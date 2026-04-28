@@ -1,13 +1,15 @@
-"""
-Punto de entrada del microservicio.
-
-Para correrlo:
-    uvicorn app.main:app --reload --port 8001
-"""
+import logging
 
 from fastapi import FastAPI
 
 from app.config import settings
+from app.webhooks.router import router as webhooks_router
+
+
+logging.basicConfig(
+    level=logging.INFO if not settings.DEBUG else logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 
 app = FastAPI(
@@ -17,12 +19,11 @@ app = FastAPI(
 )
 
 
+app.include_router(webhooks_router)
+
+
 @app.get("/health")
 def health_check():
-    """
-    Endpoint para verificar que el servicio está vivo.
-    Útil para load balancers, monitoring, y para confirmar el deploy.
-    """
     return {
         "status": "ok",
         "environment": settings.ENVIRONMENT,
@@ -32,7 +33,4 @@ def health_check():
 
 @app.get("/")
 def root():
-    return {
-        "service": "aitax-webhooks",
-        "docs": "/docs",
-    }
+    return {"service": "aitax-webhooks", "docs": "/docs"}
