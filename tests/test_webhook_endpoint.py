@@ -1,3 +1,15 @@
+"""
+Tests de integración para el endpoint POST /webhooks/syntage/
+
+Usamos:
+- FastAPI TestClient (cliente HTTP en memoria)
+- SQLite en memoria como DB de pruebas (más rápida, aislada)
+- Override de la dependencia get_db para inyectar la sesión de prueba
+
+CRÍTICO: estos tests NO tocan tu Postgres local. Cada test arranca con
+una DB limpia gracias al fixture `db_session`.
+"""
+
 import hashlib
 import hmac
 import json
@@ -9,26 +21,23 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.types import CHAR, TypeDecorator
-import sqlalchemy.types as sqltypes
 
 from app.database import Base, get_db
 from app.main import app
 from app.models import SyntageWebhookEvent
 
 
-# ─── Fix para usar tipos PG en SQLite ─────────────────────────────────
-# SQLite no soporta JSONB ni UUID nativos. Le decimos a SQLAlchemy
-# que use sus equivalentes JSON/CHAR cuando el dialecto sea sqlite.
-# Esto solo aplica para los tests; en producción seguimos con Postgres.
+# ─── Fix para usar JSONB en SQLite ────────────────────────────────────
+# SQLite no soporta JSONB nativo. Registramos un compilador custom que,
+# cuando el dialecto sea sqlite, traduzca JSONB a JSON (que SQLite sí
+# soporta desde 3.9).
+# Esto SOLO afecta a los tests; en producción seguimos con PostgreSQL real.
 
-@pytest.fixture(scope="module", autouse=True)
-def _patch_pg_types_for_sqlite():
-    """Hace que JSONB y PGUUID sean compatibles con SQLite en tests."""
-    JSONB.impl = sqltypes.JSON  # type: ignore[attr-defined]
-    yield
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_for_sqlite(element, compiler, **kw):
+    return "JSON"
 
 
 # ─── DB de pruebas ────────────────────────────────────────────────────
@@ -38,10 +47,12 @@ TEST_SIGNING_SECRET = "whsec_test_secret_for_endpoint_tests"
 
 @pytest.fixture
 def db_engine():
-    """Crea un engine SQLite en memoria con las tablas del proyecto."""
+    from sqlalchemy.pool import StaticPool
+
     engine = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
     Base.metadata.create_all(bind=engine)
     yield engine
@@ -69,7 +80,6 @@ def client(db_engine, monkeypatch) -> Generator[TestClient, None, None]:
     - get_db override para usar la DB SQLite en memoria
     - SYNTAGE_WEBHOOK_SIGNING_SECRET fijo para que las firmas sean predecibles
     """
-    # Forzamos el secret de pruebas vía monkeypatch al objeto settings.
     from app import config
     monkeypatch.setattr(
         config.settings, "SYNTAGE_WEBHOOK_SIGNING_SECRET", TEST_SIGNING_SECRET
@@ -173,7 +183,6 @@ def test_valid_webhook_stores_lowercase_headers(client, db_session):
     )
 
     event = db_session.query(SyntageWebhookEvent).one()
-    # Los headers deben estar en lowercase
     assert "x-satws-signature" in event.headers
     assert "X-Satws-Signature" not in event.headers
 
@@ -218,7 +227,6 @@ def test_tampered_body_returns_401(client, db_session):
     raw = json.dumps(payload).encode("utf-8")
     signature = _sign(raw)
 
-    # Modificamos el body después de firmar
     tampered = json.dumps({**payload, "type": "invoice.deleted"}).encode("utf-8")
 
     response = client.post(
@@ -255,7 +263,7 @@ def test_invalid_json_returns_400(client, db_session):
 
 
 def test_payload_missing_id_returns_400(client, db_session):
-    payload = {"type": "invoice.created"}  # falta `id`
+    payload = {"type": "invoice.created"}
     raw = json.dumps(payload).encode("utf-8")
     signature = _sign(raw)
 
@@ -273,7 +281,7 @@ def test_payload_missing_id_returns_400(client, db_session):
 
 
 def test_payload_missing_type_returns_400(client, db_session):
-    payload = {"id": str(uuid.uuid4())}  # falta `type`
+    payload = {"id": str(uuid.uuid4())}
     raw = json.dumps(payload).encode("utf-8")
     signature = _sign(raw)
 
@@ -296,7 +304,6 @@ def test_duplicate_event_returns_200_without_persisting_again(client, db_session
     raw = json.dumps(payload).encode("utf-8")
     signature = _sign(raw)
 
-    # Primer envío
     r1 = client.post(
         "/webhooks/syntage/",
         content=raw,
@@ -308,8 +315,6 @@ def test_duplicate_event_returns_200_without_persisting_again(client, db_session
     assert r1.status_code == 200
     assert r1.json()["status"] == "queued"
 
-    # Segundo envío del mismo evento (Syntage reintentando)
-    # Re-firmamos porque el timestamp puede ser distinto, pero el id es el mismo
     signature2 = _sign(raw)
     r2 = client.post(
         "/webhooks/syntage/",
@@ -323,7 +328,6 @@ def test_duplicate_event_returns_200_without_persisting_again(client, db_session
     assert r2.json()["status"] == "duplicate"
     assert r2.json()["event_id"] == payload["id"]
 
-    # Solo debe haber 1 registro en DB
     assert db_session.query(SyntageWebhookEvent).count() == 1
 
 
