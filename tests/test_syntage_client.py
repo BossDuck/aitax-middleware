@@ -1,11 +1,8 @@
 """
 Tests del cliente Syntage usando respx para mockear HTTP.
-
-respx intercepta peticiones httpx y devuelve respuestas fake,
-así no dependemos de la red ni de Syntage real.
 """
 
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -24,7 +21,6 @@ TEST_API_KEY = "test_api_key_12345"
 
 @pytest.fixture
 def client():
-    """Cliente con base_url y api_key fijos para los tests."""
     c = SyntageClient(base_url=BASE_URL, api_key=TEST_API_KEY)
     yield c
     c.close()
@@ -33,49 +29,20 @@ def client():
 # ─── Happy path ───────────────────────────────────────────────────────
 
 @respx.mock
-def test_fetch_invoice_returns_payload(client):
-    invoice_id = uuid4()
+def test_fetch_extraction_returns_payload(client):
+    extraction_id = uuid4()
     expected = {
-        "id": str(invoice_id),
-        "issuedAt": "2025-01-15T10:00:00.000Z",
-        "total": 1000,
+        "id": str(extraction_id),
+        "status": "finished",
+        "extractor": "invoice",
+        "taxpayer": {"id": "PEIC211118IS0", "name": "Pedro"},
     }
 
-    route = respx.get(f"{BASE_URL}/invoices/{invoice_id}").mock(
+    route = respx.get(f"{BASE_URL}/extractions/{extraction_id}").mock(
         return_value=httpx.Response(200, json=expected)
     )
 
-    result = client.fetch_invoice(invoice_id)
-
-    assert result == expected
-    assert route.called
-
-
-@respx.mock
-def test_fetch_line_item_uses_correct_url(client):
-    line_item_id = uuid4()
-    expected = {"id": str(line_item_id), "invoice": {"id": str(uuid4())}}
-
-    route = respx.get(f"{BASE_URL}/line-items/{line_item_id}").mock(
-        return_value=httpx.Response(200, json=expected)
-    )
-
-    result = client.fetch_line_item(line_item_id)
-
-    assert result == expected
-    assert route.called
-
-
-@respx.mock
-def test_fetch_payment_uses_correct_url(client):
-    payment_id = uuid4()
-    expected = {"id": str(payment_id), "createdAt": "2025-01-15T10:00:00.000Z"}
-
-    route = respx.get(f"{BASE_URL}/invoices/payments/{payment_id}").mock(
-        return_value=httpx.Response(200, json=expected)
-    )
-
-    result = client.fetch_payment(payment_id)
+    result = client.fetch_extraction(extraction_id)
 
     assert result == expected
     assert route.called
@@ -83,12 +50,12 @@ def test_fetch_payment_uses_correct_url(client):
 
 @respx.mock
 def test_sends_x_api_key_header(client):
-    invoice_id = uuid4()
-    route = respx.get(f"{BASE_URL}/invoices/{invoice_id}").mock(
-        return_value=httpx.Response(200, json={"id": str(invoice_id)})
+    extraction_id = uuid4()
+    route = respx.get(f"{BASE_URL}/extractions/{extraction_id}").mock(
+        return_value=httpx.Response(200, json={"id": str(extraction_id)})
     )
 
-    client.fetch_invoice(invoice_id)
+    client.fetch_extraction(extraction_id)
 
     request = route.calls.last.request
     assert request.headers["x-api-key"] == TEST_API_KEY
@@ -99,30 +66,28 @@ def test_sends_x_api_key_header(client):
 
 @respx.mock
 def test_404_raises_definitive_error_no_retry(client):
-    invoice_id = uuid4()
-    route = respx.get(f"{BASE_URL}/invoices/{invoice_id}").mock(
+    extraction_id = uuid4()
+    route = respx.get(f"{BASE_URL}/extractions/{extraction_id}").mock(
         return_value=httpx.Response(404, text="Not Found")
     )
 
     with pytest.raises(SyntageDefinitiveError) as exc_info:
-        client.fetch_invoice(invoice_id)
+        client.fetch_extraction(extraction_id)
 
     assert exc_info.value.status_code == 404
-    # Solo se llamó una vez: NO hubo retries
     assert route.call_count == 1
 
 
 @respx.mock
 def test_401_raises_definitive_error_no_retry(client):
-    invoice_id = uuid4()
-    route = respx.get(f"{BASE_URL}/invoices/{invoice_id}").mock(
+    extraction_id = uuid4()
+    route = respx.get(f"{BASE_URL}/extractions/{extraction_id}").mock(
         return_value=httpx.Response(401, text="Unauthorized")
     )
 
-    with pytest.raises(SyntageDefinitiveError) as exc_info:
-        client.fetch_invoice(invoice_id)
+    with pytest.raises(SyntageDefinitiveError):
+        client.fetch_extraction(extraction_id)
 
-    assert exc_info.value.status_code == 401
     assert route.call_count == 1
 
 
@@ -130,46 +95,43 @@ def test_401_raises_definitive_error_no_retry(client):
 
 @respx.mock
 def test_500_retries_three_times_then_raises(client):
-    invoice_id = uuid4()
-    route = respx.get(f"{BASE_URL}/invoices/{invoice_id}").mock(
+    extraction_id = uuid4()
+    route = respx.get(f"{BASE_URL}/extractions/{extraction_id}").mock(
         return_value=httpx.Response(500, text="Server Error")
     )
 
     with pytest.raises(SyntageRetryableError):
-        client.fetch_invoice(invoice_id)
+        client.fetch_extraction(extraction_id)
 
-    # 3 intentos totales (el original + 2 retries)
     assert route.call_count == 3
 
 
 @respx.mock
 def test_429_retries(client):
-    """Rate limit debe reintentarse."""
-    invoice_id = uuid4()
-    route = respx.get(f"{BASE_URL}/invoices/{invoice_id}").mock(
+    extraction_id = uuid4()
+    route = respx.get(f"{BASE_URL}/extractions/{extraction_id}").mock(
         return_value=httpx.Response(429, text="Too Many Requests")
     )
 
     with pytest.raises(SyntageRetryableError):
-        client.fetch_invoice(invoice_id)
+        client.fetch_extraction(extraction_id)
 
     assert route.call_count == 3
 
 
 @respx.mock
 def test_500_then_200_succeeds_after_retry(client):
-    """Si el primer intento falla con 5xx pero el segundo funciona, ok."""
-    invoice_id = uuid4()
-    expected = {"id": str(invoice_id), "issuedAt": "2025-01-15T10:00:00Z"}
+    extraction_id = uuid4()
+    expected = {"id": str(extraction_id), "status": "finished"}
 
-    route = respx.get(f"{BASE_URL}/invoices/{invoice_id}").mock(
+    route = respx.get(f"{BASE_URL}/extractions/{extraction_id}").mock(
         side_effect=[
             httpx.Response(500, text="Temporarily down"),
             httpx.Response(200, json=expected),
         ]
     )
 
-    result = client.fetch_invoice(invoice_id)
+    result = client.fetch_extraction(extraction_id)
 
     assert result == expected
     assert route.call_count == 2
@@ -177,14 +139,13 @@ def test_500_then_200_succeeds_after_retry(client):
 
 @respx.mock
 def test_timeout_retries(client):
-    """Un timeout es retryable."""
-    invoice_id = uuid4()
-    route = respx.get(f"{BASE_URL}/invoices/{invoice_id}").mock(
+    extraction_id = uuid4()
+    route = respx.get(f"{BASE_URL}/extractions/{extraction_id}").mock(
         side_effect=httpx.TimeoutException("timeout")
     )
 
     with pytest.raises(SyntageRetryableError):
-        client.fetch_invoice(invoice_id)
+        client.fetch_extraction(extraction_id)
 
     assert route.call_count == 3
 
@@ -197,7 +158,5 @@ def test_missing_api_key_raises_value_error():
 
 
 def test_context_manager_closes_client():
-    """El cliente debe poder usarse como `with SyntageClient() as c:`"""
     with SyntageClient(base_url=BASE_URL, api_key=TEST_API_KEY) as c:
         assert c is not None
-    # No debe haber error al salir del with

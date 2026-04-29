@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.models import EventStatus, SyntageWebhookEvent
+from app.tasks import process_webhook_event
 from app.webhooks.schemas import SyntageWebhookPayload
 from app.webhooks.signature import verify_syntage_signature
 
@@ -28,11 +29,11 @@ async def receive_syntage_webhook(
     db: Annotated[Session, Depends(get_db)],
     x_satws_signature: Annotated[str | None, Header()] = None,
 ):
-
-    # ─── 1. Leer raw body ─────────────────────────────────────────────
+    """
+    Endpoint público que Syntage llama cada vez que ocurre un evento.
+    """
     raw_body = await request.body()
 
-    # ─── 2. Verificar firma ───────────────────────────────────────────
     is_valid, error, syntage_timestamp = verify_syntage_signature(
         raw_body=raw_body,
         signature_header=x_satws_signature,
@@ -50,7 +51,6 @@ async def receive_syntage_webhook(
             detail="Invalid signature",
         )
 
-    # ─── 3. Parsear JSON ──────────────────────────────────────────────
     try:
         payload_dict = json.loads(raw_body)
     except json.JSONDecodeError as exc:
@@ -69,7 +69,7 @@ async def receive_syntage_webhook(
             detail="Payload missing required fields (id, type)",
         )
 
-    # ─── 4. Detectar duplicados ───────────────────────────────────────
+    # ─── Detectar duplicados ──────────────────────────────────────────
     existing = db.execute(
         select(SyntageWebhookEvent).where(
             SyntageWebhookEvent.syntage_event_id == payload.id
@@ -87,7 +87,7 @@ async def receive_syntage_webhook(
             "event_id": str(payload.id),
         }
 
-    # ─── 5. Guardar evento como `pending` ─────────────────────────────
+    # ─── Guardar evento como `pending` ────────────────────────────────
     headers_dict = {k.lower(): v for k, v in request.headers.items()}
 
     event = SyntageWebhookEvent(
@@ -123,6 +123,8 @@ async def receive_syntage_webhook(
         event.id,
     )
 
+    # ─── Encolar en Celery (Bloque 5) ─────────────────────────────────
+    process_webhook_event.delay(str(event.id))
 
     return {
         "status": "queued",
