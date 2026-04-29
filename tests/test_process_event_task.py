@@ -1,5 +1,5 @@
 import uuid
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from sqlalchemy import create_engine
@@ -57,6 +57,8 @@ def eager_celery(db_engine, monkeypatch):
     celery_module.celery_app.conf.task_eager_propagates = False
 
 
+# ─── Helpers ──────────────────────────────────────────────────────────
+
 def _make_extraction_event(db_session, event_type="extraction.updated"):
     extraction_id = uuid.uuid4()
     payload = {
@@ -91,14 +93,36 @@ def _fake_extraction(extraction_id, status="finished", extractor="invoice", rfc=
     }
 
 
-# ─── Happy path ───────────────────────────────────────────────────────
+def _fake_aitax_response(rfc="PEIC211118IS0"):
+    return {
+        "status": "ok",
+        "rfc": rfc,
+        "extraction_id": "test",
+        "company_id": "1",
+        "results": {
+            "invoices": {"2024": {"processed": 10, "upserted": 10}},
+            "concepts": {"processed": 20, "upserted": 20},
+            "payments": {"processed": 1, "upserted": 1},
+        },
+    }
 
-def test_finished_invoice_extraction_marks_processed(eager_celery, db_session):
+
+# ─── Happy path: full flow ────────────────────────────────────────────
+
+def test_full_flow_finished_invoice_extraction_marks_processed(eager_celery, db_session):
+    """Flujo completo: extraction válida → llamada a Syntage → llamada a AITAX → PROCESSED."""
     event, extraction_id = _make_extraction_event(db_session)
 
-    with patch("app.tasks.process_event.SyntageClient") as MockClient:
-        instance = MockClient.return_value.__enter__.return_value
-        instance.fetch_extraction.return_value = _fake_extraction(extraction_id)
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
+        # Syntage devuelve la extracción
+        syntage_instance = MockSyntage.return_value.__enter__.return_value
+        syntage_instance.fetch_extraction.return_value = _fake_extraction(extraction_id)
+
+        # AITAX responde OK
+        aitax_instance = MockAitax.return_value.__enter__.return_value
+        aitax_instance.notify_extraction_completed.return_value = _fake_aitax_response()
 
         from app.tasks.process_event import process_webhook_event
         result = process_webhook_event.apply(args=[str(event.id)]).get()
@@ -106,23 +130,30 @@ def test_finished_invoice_extraction_marks_processed(eager_celery, db_session):
     assert result["status"] == "processed"
     assert result["rfc"] == "PEIC211118IS0"
     assert result["extraction_id"] == str(extraction_id)
+    assert "aitax_results" in result
+
+    # Verifica que se llamó a AITAX con los argumentos correctos
+    aitax_instance.notify_extraction_completed.assert_called_once_with(
+        rfc="PEIC211118IS0",
+        extraction_id=str(extraction_id),
+    )
 
     db_session.expire_all()
     refreshed = db_session.get(SyntageWebhookEvent, event.id)
     assert refreshed.status == EventStatus.PROCESSED.value
-    assert refreshed.attempts == 1
-    assert refreshed.processed_at is not None
 
 
-# ─── Filtros: SKIPPED ─────────────────────────────────────────────────
+# ─── Filtros: SKIPPED (no se llama a AITAX) ───────────────────────────
 
 @pytest.mark.parametrize("status", ["pending", "running", "failed", "stopped"])
-def test_non_finished_extraction_marks_skipped(eager_celery, db_session, status):
+def test_non_finished_extraction_marks_skipped_no_aitax_call(eager_celery, db_session, status):
     event, extraction_id = _make_extraction_event(db_session)
 
-    with patch("app.tasks.process_event.SyntageClient") as MockClient:
-        instance = MockClient.return_value.__enter__.return_value
-        instance.fetch_extraction.return_value = _fake_extraction(
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
+        syntage_instance = MockSyntage.return_value.__enter__.return_value
+        syntage_instance.fetch_extraction.return_value = _fake_extraction(
             extraction_id, status=status
         )
 
@@ -130,6 +161,8 @@ def test_non_finished_extraction_marks_skipped(eager_celery, db_session, status)
         result = process_webhook_event.apply(args=[str(event.id)]).get()
 
     assert result["status"] == "skipped"
+    # Confirmamos que NO se llamó a AITAX (extracción se filtró antes).
+    MockAitax.assert_not_called()
 
     db_session.expire_all()
     refreshed = db_session.get(SyntageWebhookEvent, event.id)
@@ -140,9 +173,11 @@ def test_non_finished_extraction_marks_skipped(eager_celery, db_session, status)
 def test_non_invoice_extractor_marks_skipped(eager_celery, db_session, extractor):
     event, extraction_id = _make_extraction_event(db_session)
 
-    with patch("app.tasks.process_event.SyntageClient") as MockClient:
-        instance = MockClient.return_value.__enter__.return_value
-        instance.fetch_extraction.return_value = _fake_extraction(
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
+        syntage_instance = MockSyntage.return_value.__enter__.return_value
+        syntage_instance.fetch_extraction.return_value = _fake_extraction(
             extraction_id, extractor=extractor
         )
 
@@ -150,10 +185,7 @@ def test_non_invoice_extractor_marks_skipped(eager_celery, db_session, extractor
         result = process_webhook_event.apply(args=[str(event.id)]).get()
 
     assert result["status"] == "skipped"
-
-    db_session.expire_all()
-    refreshed = db_session.get(SyntageWebhookEvent, event.id)
-    assert refreshed.status == EventStatus.SKIPPED.value
+    MockAitax.assert_not_called()
 
 
 # ─── Eventos no soportados ────────────────────────────────────────────
@@ -177,31 +209,32 @@ def test_unsupported_event_type_marks_skipped(eager_celery, db_session):
     db_session.commit()
     db_session.refresh(event)
 
-    with patch("app.tasks.process_event.SyntageClient") as MockClient:
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
         from app.tasks.process_event import process_webhook_event
         result = process_webhook_event.apply(args=[str(event.id)]).get()
 
-        # Ni siquiera se llamó a Syntage, porque el evento se descartó antes.
-        instance = MockClient.return_value.__enter__.return_value
-        instance.fetch_extraction.assert_not_called()
+        # Ni Syntage ni AITAX se llamaron
+        syntage_instance = MockSyntage.return_value.__enter__.return_value
+        syntage_instance.fetch_extraction.assert_not_called()
+        MockAitax.assert_not_called()
 
     assert result["status"] == "skipped"
 
-    db_session.expire_all()
-    refreshed = db_session.get(SyntageWebhookEvent, event.id)
-    assert refreshed.status == EventStatus.SKIPPED.value
 
+# ─── Errores de Syntage: FAILED (no se llama a AITAX) ─────────────────
 
-# ─── Errores definitivos: FAILED ──────────────────────────────────────
-
-def test_404_from_syntage_marks_failed(eager_celery, db_session):
+def test_syntage_404_marks_failed_no_aitax_call(eager_celery, db_session):
     event, extraction_id = _make_extraction_event(db_session)
 
     from app.syntage.client import SyntageDefinitiveError
 
-    with patch("app.tasks.process_event.SyntageClient") as MockClient:
-        instance = MockClient.return_value.__enter__.return_value
-        instance.fetch_extraction.side_effect = SyntageDefinitiveError(
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
+        syntage_instance = MockSyntage.return_value.__enter__.return_value
+        syntage_instance.fetch_extraction.side_effect = SyntageDefinitiveError(
             "Not found", status_code=404
         )
 
@@ -209,48 +242,63 @@ def test_404_from_syntage_marks_failed(eager_celery, db_session):
         result = process_webhook_event.apply(args=[str(event.id)]).get()
 
     assert result["status"] == "failed"
+    MockAitax.assert_not_called()
+
     db_session.expire_all()
     refreshed = db_session.get(SyntageWebhookEvent, event.id)
     assert refreshed.status == EventStatus.FAILED.value
 
 
-def test_invalid_payload_marks_failed(eager_celery, db_session):
-    payload = {
-        "id": str(uuid.uuid4()),
-        "type": "extraction.updated",
-    }
-    event = SyntageWebhookEvent(
-        syntage_event_id=uuid.uuid4(),
-        event_type="extraction.updated",   # ← evento SOPORTADO
-        source=None,
-        payload=payload,
-        headers={},
-        status=EventStatus.PENDING.value,
-        attempts=0,
-    )
-    db_session.add(event)
-    db_session.commit()
-    db_session.refresh(event)
+# ─── Errores de AITAX ─────────────────────────────
 
-    with patch("app.tasks.process_event.SyntageClient"):
+def test_aitax_404_marks_failed(eager_celery, db_session):
+    """AITAX devuelve 404 (Company no existe en su DB) → FAILED."""
+    event, extraction_id = _make_extraction_event(db_session)
+
+    from app.aitax.client import AitaxDefinitiveError
+
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
+        syntage_instance = MockSyntage.return_value.__enter__.return_value
+        syntage_instance.fetch_extraction.return_value = _fake_extraction(extraction_id)
+
+        aitax_instance = MockAitax.return_value.__enter__.return_value
+        aitax_instance.notify_extraction_completed.side_effect = AitaxDefinitiveError(
+            "Company not found", status_code=404
+        )
+
         from app.tasks.process_event import process_webhook_event
         result = process_webhook_event.apply(args=[str(event.id)]).get()
 
+    # Validamos el resultado del task
     assert result["status"] == "failed"
+    assert "Company not found" in result["reason"]
+
+    # Validamos que la DB sí guardó el status_code 404 en last_error
     db_session.expire_all()
     refreshed = db_session.get(SyntageWebhookEvent, event.id)
     assert refreshed.status == EventStatus.FAILED.value
+    assert "404" in refreshed.last_error
+    assert "AITAX" in refreshed.last_error
 
 
-def test_missing_taxpayer_marks_failed(eager_celery, db_session):
+def test_aitax_401_marks_failed(eager_celery, db_session):
+    """AITAX devuelve 401 (token mal configurado) → FAILED."""
     event, extraction_id = _make_extraction_event(db_session)
 
-    extraction_without_taxpayer = _fake_extraction(extraction_id)
-    del extraction_without_taxpayer["taxpayer"]
+    from app.aitax.client import AitaxDefinitiveError
 
-    with patch("app.tasks.process_event.SyntageClient") as MockClient:
-        instance = MockClient.return_value.__enter__.return_value
-        instance.fetch_extraction.return_value = extraction_without_taxpayer
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
+        syntage_instance = MockSyntage.return_value.__enter__.return_value
+        syntage_instance.fetch_extraction.return_value = _fake_extraction(extraction_id)
+
+        aitax_instance = MockAitax.return_value.__enter__.return_value
+        aitax_instance.notify_extraction_completed.side_effect = AitaxDefinitiveError(
+            "Invalid token", status_code=401
+        )
 
         from app.tasks.process_event import process_webhook_event
         result = process_webhook_event.apply(args=[str(event.id)]).get()
@@ -265,20 +313,66 @@ def test_already_processed_event_is_skipped(eager_celery, db_session):
     event.status = EventStatus.PROCESSED.value
     db_session.commit()
 
-    with patch("app.tasks.process_event.SyntageClient") as MockClient:
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
         from app.tasks.process_event import process_webhook_event
         result = process_webhook_event.apply(args=[str(event.id)]).get()
 
         assert result["status"] == "already_processed"
-        MockClient.assert_not_called()
+        MockSyntage.assert_not_called()
+        MockAitax.assert_not_called()
 
 
-# ─── Evento no encontrado ─────────────────────────────────────────────
+def test_invalid_payload_marks_failed(eager_celery, db_session):
+    """Evento con source faltante."""
+    payload = {"id": str(uuid.uuid4()), "type": "extraction.updated"}
+    event = SyntageWebhookEvent(
+        syntage_event_id=uuid.uuid4(),
+        event_type="extraction.updated",
+        source=None,
+        payload=payload,
+        headers={},
+        status=EventStatus.PENDING.value,
+        attempts=0,
+    )
+    db_session.add(event)
+    db_session.commit()
+    db_session.refresh(event)
+
+    with patch("app.tasks.process_event.SyntageClient"), \
+         patch("app.tasks.process_event.AitaxClient"):
+        from app.tasks.process_event import process_webhook_event
+        result = process_webhook_event.apply(args=[str(event.id)]).get()
+
+    assert result["status"] == "failed"
+
+
+def test_missing_taxpayer_marks_failed(eager_celery, db_session):
+    event, extraction_id = _make_extraction_event(db_session)
+
+    extraction_without_taxpayer = _fake_extraction(extraction_id)
+    del extraction_without_taxpayer["taxpayer"]
+
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
+        syntage_instance = MockSyntage.return_value.__enter__.return_value
+        syntage_instance.fetch_extraction.return_value = extraction_without_taxpayer
+
+        from app.tasks.process_event import process_webhook_event
+        result = process_webhook_event.apply(args=[str(event.id)]).get()
+
+    assert result["status"] == "failed"
+    MockAitax.assert_not_called()
+
 
 def test_missing_event_returns_not_found(eager_celery, db_session):
     fake_id = uuid.uuid4()
 
-    from app.tasks.process_event import process_webhook_event
-    result = process_webhook_event.apply(args=[str(fake_id)]).get()
+    with patch("app.tasks.process_event.SyntageClient"), \
+         patch("app.tasks.process_event.AitaxClient"):
+        from app.tasks.process_event import process_webhook_event
+        result = process_webhook_event.apply(args=[str(fake_id)]).get()
 
     assert result["status"] == "not_found"

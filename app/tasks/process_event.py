@@ -21,6 +21,12 @@ from app.syntage.event_router import (
     fetch_extraction_for_event,
 )
 
+from app.aitax.client import (
+    AitaxClient,
+    AitaxDefinitiveError,
+    AitaxRetryableError,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +43,7 @@ RETRY_BACKOFF_BASE = 60  # 1 min, 2 min, 4 min entre reintentos
     name="app.tasks.process_webhook_event",
     max_retries=MAX_RETRIES,
     acks_late=True,                      # Solo ack tras éxito o failure final.
-    autoretry_for=(SyntageRetryableError, ConnectionError),
+    autoretry_for=(SyntageRetryableError, AitaxRetryableError, ConnectionError),
     retry_backoff=RETRY_BACKOFF_BASE,    # Backoff exponencial: 60s, 120s, 240s...
     retry_backoff_max=600,               # Tope de 10 min entre reintentos.
     retry_jitter=True,                   # Aleatoriedad para evitar "thundering herd".
@@ -129,14 +135,40 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
         # ─── Aquí ya tenemos `extraction` validada ─────────────────────
         from app.syntage.event_router import get_taxpayer_rfc
         rfc = get_taxpayer_rfc(extraction)
+        extraction_id = extraction.get("id")
+
         logger.info(
             "Extracción lista para sync: event_id=%s, rfc=%s, extraction_id=%s, "
             "createdDataPoints=%s, updatedDataPoints=%s",
             event_uuid,
             rfc,
-            extraction.get("id"),
+            extraction_id,
             extraction.get("createdDataPoints"),
             extraction.get("updatedDataPoints"),
+        )
+
+        # ─── Llamar a AITAX  ─────────────────────────────────
+        try:
+            with AitaxClient() as aitax:
+                aitax_result = aitax.notify_extraction_completed(
+                    rfc=rfc,
+                    extraction_id=extraction_id,
+                )
+        except AitaxDefinitiveError as exc:
+            logger.error(
+                "AITAX devolvió error definitivo en evento %s (status=%s): %s",
+                event_uuid, exc.status_code, exc,
+            )
+            _mark_failed(db, event, f"AITAX {exc.status_code}: {exc}")
+            return {"status": "failed", "event_id": event_internal_id, "reason": str(exc)}
+
+        except AitaxRetryableError:
+            raise
+
+        logger.info(
+            "AITAX procesó la extracción exitosamente para RFC=%s: %s",
+            rfc,
+            aitax_result.get("results"),
         )
 
         # ─── Marcar como procesado ─────────────────────────────────────
@@ -149,8 +181,9 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
             "status": "processed",
             "event_id": event_internal_id,
             "event_type": event.event_type,
-            "extraction_id": extraction.get("id"),
+            "extraction_id": extraction_id,
             "rfc": rfc,
+            "aitax_results": aitax_result.get("results"),
         }
 
     except MaxRetriesExceededError:
