@@ -70,31 +70,33 @@ class MissingTaxpayerError(Exception):
 
 def extract_resource_id(payload: dict, event_type: str) -> UUID:
     """
-    Extrae el UUID del recurso afectado desde el campo `source` del payload.
+    Extrae el UUID del recurso afectado desde el campo `resource` del payload.
 
-    Para eventos extraction.*, source viene como "/extractions/<uuid>".
+    Para eventos extraction.*, resource viene como "/extractions/<uuid>".
+
     """
-    source = payload.get("source")
+    resource_iri = payload.get("resource")
 
-    if not source or not isinstance(source, str):
+    if not resource_iri or not isinstance(resource_iri, str):
         raise InvalidEventPayloadError(
-            f"Webhook '{event_type}' no trae campo 'source' válido. "
+            f"Webhook '{event_type}' no trae campo 'resource' válido. "
             f"Payload keys: {list(payload.keys())}"
         )
 
-    last_segment = source.rstrip("/").rsplit("/", 1)[-1]
+    last_segment = resource_iri.rstrip("/").rsplit("/", 1)[-1]
 
     if not last_segment:
         raise InvalidEventPayloadError(
-            f"Webhook '{event_type}' tiene 'source' vacío tras parsear: '{source}'"
+            f"Webhook '{event_type}' tiene 'resource' vacío tras parsear: "
+            f"'{resource_iri}'"
         )
 
     try:
         return UUID(last_segment)
     except ValueError as exc:
         raise InvalidEventPayloadError(
-            f"Webhook '{event_type}' tiene 'source' que no termina en UUID válido: "
-            f"'{source}'"
+            f"Webhook '{event_type}' tiene 'resource' que no termina en UUID "
+            f"válido: '{resource_iri}'"
         ) from exc
 
 

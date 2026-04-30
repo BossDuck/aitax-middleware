@@ -51,7 +51,7 @@ def _make_extraction(
 def test_extract_resource_id_from_extractions_iri():
     payload = {
         "type": "extraction.updated",
-        "source": "/extractions/91106968-1abd-4d64-85c1-4e73d96fb997",
+        "resource": "/extractions/91106968-1abd-4d64-85c1-4e73d96fb997",
     }
     result = extract_resource_id(payload, "extraction.updated")
     assert result == UUID("91106968-1abd-4d64-85c1-4e73d96fb997")
@@ -59,26 +59,26 @@ def test_extract_resource_id_from_extractions_iri():
 
 def test_extract_resource_id_handles_full_url():
     payload = {
-        "source": "https://api.syntage.com/extractions/91106968-1abd-4d64-85c1-4e73d96fb997"
+        "resource": "https://api.syntage.com/extractions/91106968-1abd-4d64-85c1-4e73d96fb997"
     }
     result = extract_resource_id(payload, "extraction.updated")
     assert result == UUID("91106968-1abd-4d64-85c1-4e73d96fb997")
 
 
-def test_missing_source_raises():
+def test_missing_resource_raises():
     payload = {"id": "evt", "type": "extraction.updated"}
-    with pytest.raises(InvalidEventPayloadError, match="source"):
+    with pytest.raises(InvalidEventPayloadError, match="resource"):
         extract_resource_id(payload, "extraction.updated")
 
 
-def test_null_source_raises():
-    payload = {"source": None, "type": "extraction.updated"}
+def test_null_resource_raises():
+    payload = {"resource": None, "type": "extraction.updated"}
     with pytest.raises(InvalidEventPayloadError):
         extract_resource_id(payload, "extraction.updated")
 
 
-def test_source_not_ending_in_uuid_raises():
-    payload = {"source": "/extractions/not-a-uuid"}
+def test_resource_not_ending_in_uuid_raises():
+    payload = {"resource": "/extractions/not-a-uuid"}
     with pytest.raises(InvalidEventPayloadError, match="UUID"):
         extract_resource_id(payload, "extraction.updated")
 
@@ -94,7 +94,7 @@ def test_fetch_extraction_for_event_finished_invoice_passes():
 
     payload = {
         "type": "extraction.updated",
-        "source": f"/extractions/{extraction_id}",
+        "resource": f"/extractions/{extraction_id}",
     }
 
     result = fetch_extraction_for_event(client, "extraction.updated", payload)
@@ -113,7 +113,7 @@ def test_fetch_extraction_for_event_works_for_extraction_created():
 
     payload = {
         "type": "extraction.created",
-        "source": f"/extractions/{extraction_id}",
+        "resource": f"/extractions/{extraction_id}",
     }
 
     result = fetch_extraction_for_event(client, "extraction.created", payload)
@@ -135,7 +135,7 @@ def test_non_finished_status_raises_not_relevant(non_finished_status):
 
     payload = {
         "type": "extraction.updated",
-        "source": f"/extractions/{extraction_id}",
+        "resource": f"/extractions/{extraction_id}",
     }
 
     with pytest.raises(ExtractionNotRelevantError, match=non_finished_status):
@@ -163,7 +163,7 @@ def test_non_invoice_extractor_raises_not_relevant(non_invoice_extractor):
 
     payload = {
         "type": "extraction.updated",
-        "source": f"/extractions/{extraction_id}",
+        "resource": f"/extractions/{extraction_id}",
     }
 
     with pytest.raises(ExtractionNotRelevantError, match=non_invoice_extractor):
@@ -182,7 +182,7 @@ def test_missing_taxpayer_raises():
 
     payload = {
         "type": "extraction.updated",
-        "source": f"/extractions/{extraction_id}",
+        "resource": f"/extractions/{extraction_id}",
     }
 
     with pytest.raises(MissingTaxpayerError):
@@ -199,7 +199,7 @@ def test_taxpayer_without_id_raises():
 
     payload = {
         "type": "extraction.updated",
-        "source": f"/extractions/{extraction_id}",
+        "resource": f"/extractions/{extraction_id}",
     }
 
     with pytest.raises(MissingTaxpayerError):
@@ -219,7 +219,7 @@ def test_taxpayer_without_id_raises():
 )
 def test_unsupported_event_type_raises(unsupported_event):
     client = MagicMock()
-    payload = {"type": unsupported_event, "source": "/whatever/abc"}
+    payload = {"type": unsupported_event, "resource": "/whatever/abc"}
 
     with pytest.raises(UnsupportedEventTypeError, match=unsupported_event):
         fetch_extraction_for_event(client, unsupported_event, payload)
@@ -229,7 +229,7 @@ def test_unsupported_event_type_raises(unsupported_event):
 
 def test_invalid_payload_propagates_error():
     client = MagicMock()
-    payload = {"type": "extraction.updated"}  # sin source
+    payload = {"type": "extraction.updated"}  # sin resource
 
     with pytest.raises(InvalidEventPayloadError):
         fetch_extraction_for_event(client, "extraction.updated", payload)

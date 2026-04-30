@@ -64,7 +64,7 @@ def _make_extraction_event(db_session, event_type="extraction.updated"):
     payload = {
         "id": str(uuid.uuid4()),
         "type": event_type,
-        "source": f"/extractions/{extraction_id}",
+        "resource": f"/extractions/{extraction_id}",
     }
     event = SyntageWebhookEvent(
         syntage_event_id=uuid.uuid4(),
@@ -194,7 +194,7 @@ def test_unsupported_event_type_marks_skipped(eager_celery, db_session):
     payload = {
         "id": str(uuid.uuid4()),
         "type": "credential.updated",
-        "source": "/credentials/abc",
+        "resource": "/credentials/abc",
     }
     event = SyntageWebhookEvent(
         syntage_event_id=uuid.uuid4(),
@@ -325,7 +325,7 @@ def test_already_processed_event_is_skipped(eager_celery, db_session):
 
 
 def test_invalid_payload_marks_failed(eager_celery, db_session):
-    """Evento con source faltante."""
+    """Evento sin campo resource."""
     payload = {"id": str(uuid.uuid4()), "type": "extraction.updated"}
     event = SyntageWebhookEvent(
         syntage_event_id=uuid.uuid4(),

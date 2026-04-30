@@ -152,9 +152,12 @@ def test_timeout_retries(client):
 
 # ─── Configuración del cliente ────────────────────────────────────────
 
-def test_missing_api_key_raises_value_error():
+def test_missing_api_key_raises_value_error(monkeypatch):
+    from app import config
+    monkeypatch.setattr(config.settings, "SYNTAGE_API_KEY", "")
+
     with pytest.raises(ValueError, match="SYNTAGE_API_KEY"):
-        SyntageClient(base_url=BASE_URL, api_key="")
+        SyntageClient(base_url=BASE_URL)
 
 
 def test_context_manager_closes_client():
