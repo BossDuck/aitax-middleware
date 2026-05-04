@@ -15,7 +15,7 @@ from app.syntage.client import (
 )
 
 
-BASE_URL = "https://api.sandbox.syntage.com"
+BASE_URL = "https://api.syntage.com"
 TEST_API_KEY = "test_api_key_12345"
 
 

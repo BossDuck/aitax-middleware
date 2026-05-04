@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     DB_USER: str = "postgres"
     DB_PASSWORD: str = ""
 
-    SYNTAGE_API_URL: str = "https://api.sandbox.syntage.com"
+    SYNTAGE_API_URL: str = "https://api.syntage.com"
     SYNTAGE_API_KEY: str = ""
     SYNTAGE_WEBHOOK_SIGNING_SECRET: str = ""
     SYNTAGE_WEBHOOK_TOLERANCE: int = 300

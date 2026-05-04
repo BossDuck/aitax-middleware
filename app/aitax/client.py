@@ -97,7 +97,7 @@ class AitaxClient:
         AITAX correrá sync_all(company) síncronamente y devolverá el resumen.
 
         Args:
-            rfc: RFC de la empresa (ej. "GIN200414CC8").
+            rfc: RFC de la empresa (ej. "BRP0001RP").
             extraction_id: ID de la extracción de Syntage (para audit).
             start_year: opcional, año inicial para el sync de invoices.
             end_year: opcional, año final.
