@@ -147,6 +147,41 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
             extraction.get("updatedDataPoints"),
         )
 
+        # ─── Idempotencia por extraction_id ───────────────────────────
+        if extraction_id:
+            already_processed = (
+                db.query(SyntageWebhookEvent)
+                .filter(
+                    SyntageWebhookEvent.id != event.id,
+                    SyntageWebhookEvent.status == EventStatus.PROCESSED.value,
+                    # En el payload de Syntage, el extraction_id vive en:
+                    # payload -> data -> object -> id
+                    SyntageWebhookEvent.payload["data"]["object"]["id"].as_string()
+                        == str(extraction_id),
+                )
+                .first()
+            )
+
+            if already_processed:
+                logger.info(
+                    "Extracción %s ya fue procesada por evento %s. "
+                    "Saltando este (event_id=%s) para evitar sync duplicado.",
+                    extraction_id, already_processed.id, event_uuid,
+                )
+                event.status = EventStatus.SKIPPED.value
+                event.last_error = (
+                    f"Extracción {extraction_id} ya procesada "
+                    f"por evento {already_processed.id}"
+                )
+                event.processed_at = datetime.now(timezone.utc)
+                db.commit()
+                return {
+                    "status": "skipped",
+                    "event_id": event_internal_id,
+                    "reason": "extraction_already_processed",
+                    "previous_event_id": str(already_processed.id),
+                }
+
         # ─── Llamar a AITAX  ─────────────────────────────────
         try:
             with AitaxClient() as aitax:

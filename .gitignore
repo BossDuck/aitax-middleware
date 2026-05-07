@@ -45,3 +45,5 @@ htmlcov/
 *.db
 
 scripts/
+
+CLOUDE.md
