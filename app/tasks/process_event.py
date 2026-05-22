@@ -24,11 +24,15 @@ from app.syntage.event_router import (
     get_taxpayer_rfc,
 )
 
+from sqlalchemy import select
+
 from app.aitax.client import (
     AitaxClient,
     AitaxDefinitiveError,
     AitaxRetryableError,
 )
+from app.aitax_models import Company
+from app.sync.sync import sync_all
 
 
 logger = logging.getLogger(__name__)
@@ -188,39 +192,87 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
                     "previous_event_id": str(already_processed.id),
                 }
 
-        # ─── Llamar a AITAX ───────────────────────────────────────────
-        try:
-            with AitaxClient() as aitax:
-                if result.action == ACTION_NOTIFY_COMPLETED:
-                    aitax_result = aitax.notify_extraction_completed(
-                        rfc=rfc,
-                        extraction_id=extraction_id,
-                    )
-                elif result.action == ACTION_NOTIFY_STATUS_UPDATE:
+        # ─── Sincronización / notificación ───────────────────────────
+        if result.action == ACTION_NOTIFY_COMPLETED:
+            # Sync directo: el microservicio escribe en la DB de AITAX sin
+            # pasar por el endpoint interno de Django.
+            company = db.execute(
+                select(Company).where(Company.rfc == rfc)
+            ).scalar_one_or_none()
+
+            if company is None:
+                logger.error(
+                    "Empresa RFC=%s no encontrada en DB. Marcando evento como fallido.",
+                    rfc,
+                )
+                _mark_failed(db, event, f"Company RFC={rfc} no existe en la DB de AITAX")
+                return {
+                    "status": "failed",
+                    "event_id": event_internal_id,
+                    "reason": f"company_not_found: {rfc}",
+                }
+
+            # Notifica a Django que el sync está por empezar → SYNCING
+            try:
+                with AitaxClient() as aitax:
+                    aitax.notify_sync_started(rfc=rfc, extraction_id=extraction_id)
+            except (AitaxDefinitiveError, AitaxRetryableError) as exc:
+                logger.warning(
+                    "No se pudo notificar sync-started a AITAX (RFC=%s): %s. Continuando sync.",
+                    rfc, exc,
+                )
+
+            logger.info(
+                "Iniciando sync_all para RFC=%s (company_id=%s, extraction_id=%s)",
+                rfc, company.id, extraction_id,
+            )
+            aitax_result = sync_all(company)
+            logger.info("sync_all completado para RFC=%s: %s", rfc, aitax_result)
+
+            # Notifica a Django para que actualice ExtractionSyncStatus y mande el email.
+            try:
+                with AitaxClient() as aitax:
+                    aitax.notify_extraction_completed(rfc=rfc, extraction_id=extraction_id)
+                logger.info("AITAX notificado de sync completado para RFC=%s", rfc)
+            except AitaxDefinitiveError as exc:
+                logger.warning(
+                    "No se pudo notificar a AITAX tras sync (RFC=%s, status=%s): %s. "
+                    "El sync ya se hizo — se continúa como procesado.",
+                    rfc, exc.status_code, exc,
+                )
+            except AitaxRetryableError as exc:
+                logger.warning(
+                    "Error transitorio al notificar a AITAX tras sync (RFC=%s): %s. "
+                    "El sync ya se hizo — se continúa como procesado.",
+                    rfc, exc,
+                )
+
+        elif result.action == ACTION_NOTIFY_STATUS_UPDATE:
+            try:
+                with AitaxClient() as aitax:
                     aitax_result = aitax.notify_extraction_status_update(
                         extraction_id=extraction_id,
                         extractor=extractor,
                         status=extraction_status,
                         rfc=rfc,
                     )
-                else:
-                    raise ValueError(f"Acción desconocida: {result.action!r}")
-        except AitaxDefinitiveError as exc:
-            logger.error(
-                "AITAX devolvió error definitivo en evento %s (status=%s): %s",
-                event_uuid, exc.status_code, exc,
-            )
-            _mark_failed(db, event, f"AITAX {exc.status_code}: {exc}")
-            return {"status": "failed", "event_id": event_internal_id, "reason": str(exc)}
+            except AitaxDefinitiveError as exc:
+                logger.error(
+                    "AITAX devolvió error definitivo en evento %s (status=%s): %s",
+                    event_uuid, exc.status_code, exc,
+                )
+                _mark_failed(db, event, f"AITAX {exc.status_code}: {exc}")
+                return {"status": "failed", "event_id": event_internal_id, "reason": str(exc)}
+            except AitaxRetryableError:
+                raise
 
-        except AitaxRetryableError:
-            raise
+        else:
+            raise ValueError(f"Acción desconocida: {result.action!r}")
 
         logger.info(
-            "AITAX procesó la notificación exitosamente para RFC=%s (action=%s): %s",
+            "Procesamiento exitoso para RFC=%s (action=%s)",
             rfc,
             result.action,
-            aitax_result,
         )
 
         # ─── Marcar como procesado ─────────────────────────────────────

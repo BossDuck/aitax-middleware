@@ -13,8 +13,8 @@ engine = create_engine(
     settings.database_url,
     echo=False,
     pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
+    pool_size=10,   # sync_all usa hasta 3 threads × N workers simultáneos
+    max_overflow=20,
 )
 
 

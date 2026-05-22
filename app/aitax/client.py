@@ -83,45 +83,30 @@ class AitaxClient:
 
     # ─── API pública ──────────────────────────────────────────────────
 
-    def notify_extraction_completed(
-        self,
-        rfc: str,
-        extraction_id: str,
-        start_year: int | None = None,
-        end_year: int | None = None,
-    ) -> dict:
+    def notify_sync_started(self, rfc: str, extraction_id: str) -> dict:
+        """
+        POST /api/internal/sync/sync-started/
+
+        Notifica a Django que el microservicio va a empezar a insertar datos.
+        Django pasa ExtractionSyncStatus a SYNCING y el browser empieza el polling.
+        """
+        return self._post(
+            "/api/internal/sync/sync-started/",
+            {"rfc": rfc, "extraction_id": extraction_id},
+        )
+
+    def notify_extraction_completed(self, rfc: str, extraction_id: str) -> dict:
         """
         POST /api/internal/sync/extraction-completed/
 
-        Notifica a AITAX que una extracción de Syntage terminó.
-        AITAX correrá sync_all(company) síncronamente y devolverá el resumen.
-
-        Args:
-            rfc: RFC de la empresa (ej. "BRP0001RP").
-            extraction_id: ID de la extracción de Syntage (para audit).
-            start_year: opcional, año inicial para el sync de invoices.
-            end_year: opcional, año final.
-
-        Returns:
-            dict con:
-                {
-                    "status": "ok",
-                    "rfc": "...",
-                    "extraction_id": "...",
-                    "company_id": "...",
-                    "results": {...}
-                }
+        Notifica a Django que el microservicio terminó el sync.
+        Django actualiza ExtractionSyncStatus y manda el email al usuario.
+        El sync ya fue hecho por el microservicio — Django NO corre sync_all.
         """
-        body = {
-            "rfc": rfc,
-            "extraction_id": extraction_id,
-        }
-        if start_year is not None:
-            body["start_year"] = start_year
-        if end_year is not None:
-            body["end_year"] = end_year
-
-        return self._post("/api/internal/sync/extraction-completed/", body)
+        return self._post(
+            "/api/internal/sync/extraction-completed/",
+            {"rfc": rfc, "extraction_id": extraction_id},
+        )
 
     def notify_extraction_status_update(
         self,
