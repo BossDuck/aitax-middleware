@@ -46,4 +46,6 @@ htmlcov/
 
 scripts/
 
-CLOUDE.md
+CLAUDE.md
+.claude
+*.dump

@@ -14,11 +14,14 @@ from app.syntage.client import (
     SyntageRetryableError,
 )
 from app.syntage.event_router import (
+    ACTION_NOTIFY_COMPLETED,
+    ACTION_NOTIFY_STATUS_UPDATE,
     ExtractionNotRelevantError,
     InvalidEventPayloadError,
     MissingTaxpayerError,
     UnsupportedEventTypeError,
     fetch_extraction_for_event,
+    get_taxpayer_rfc,
 )
 
 from app.aitax.client import (
@@ -87,11 +90,12 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
         # ─── Llamar a Syntage ──────────────────────────────────────────
         try:
             with SyntageClient() as client:
-                extraction = fetch_extraction_for_event(
+                result = fetch_extraction_for_event(
                     client=client,
                     event_type=event.event_type,
                     payload=event.payload,
                 )
+            extraction = result.extraction
         except UnsupportedEventTypeError as exc:
             # Evento que no nos corresponde procesar.
             logger.info("Evento no soportado %s: %s", event_uuid, exc)
@@ -133,18 +137,20 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
             raise
 
         # ─── Aquí ya tenemos `extraction` validada ─────────────────────
-        from app.syntage.event_router import get_taxpayer_rfc
         rfc = get_taxpayer_rfc(extraction)
         extraction_id = extraction.get("id")
+        extractor = extraction.get("extractor")
+        extraction_status = extraction.get("status")
 
         logger.info(
-            "Extracción lista para sync: event_id=%s, rfc=%s, extraction_id=%s, "
-            "createdDataPoints=%s, updatedDataPoints=%s",
+            "Extracción lista para notificar: event_id=%s, rfc=%s, "
+            "extraction_id=%s, extractor=%s, status=%s, action=%s",
             event_uuid,
             rfc,
             extraction_id,
-            extraction.get("createdDataPoints"),
-            extraction.get("updatedDataPoints"),
+            extractor,
+            extraction_status,
+            result.action,
         )
 
         # ─── Idempotencia por extraction_id ───────────────────────────
@@ -182,13 +188,23 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
                     "previous_event_id": str(already_processed.id),
                 }
 
-        # ─── Llamar a AITAX  ─────────────────────────────────
+        # ─── Llamar a AITAX ───────────────────────────────────────────
         try:
             with AitaxClient() as aitax:
-                aitax_result = aitax.notify_extraction_completed(
-                    rfc=rfc,
-                    extraction_id=extraction_id,
-                )
+                if result.action == ACTION_NOTIFY_COMPLETED:
+                    aitax_result = aitax.notify_extraction_completed(
+                        rfc=rfc,
+                        extraction_id=extraction_id,
+                    )
+                elif result.action == ACTION_NOTIFY_STATUS_UPDATE:
+                    aitax_result = aitax.notify_extraction_status_update(
+                        extraction_id=extraction_id,
+                        extractor=extractor,
+                        status=extraction_status,
+                        rfc=rfc,
+                    )
+                else:
+                    raise ValueError(f"Acción desconocida: {result.action!r}")
         except AitaxDefinitiveError as exc:
             logger.error(
                 "AITAX devolvió error definitivo en evento %s (status=%s): %s",
@@ -201,9 +217,10 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
             raise
 
         logger.info(
-            "AITAX procesó la extracción exitosamente para RFC=%s: %s",
+            "AITAX procesó la notificación exitosamente para RFC=%s (action=%s): %s",
             rfc,
-            aitax_result.get("results"),
+            result.action,
+            aitax_result,
         )
 
         # ─── Marcar como procesado ─────────────────────────────────────
@@ -217,8 +234,11 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
             "event_id": event_internal_id,
             "event_type": event.event_type,
             "extraction_id": extraction_id,
+            "extractor": extractor,
+            "extraction_status": extraction_status,
             "rfc": rfc,
-            "aitax_results": aitax_result.get("results"),
+            "action": result.action,
+            "aitax_result": aitax_result,
         }
 
     except MaxRetriesExceededError:

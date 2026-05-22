@@ -123,6 +123,36 @@ class AitaxClient:
 
         return self._post("/api/internal/sync/extraction-completed/", body)
 
+    def notify_extraction_status_update(
+        self,
+        extraction_id: str,
+        extractor: str,
+        status: str,
+        rfc: str,
+    ) -> dict:
+        """
+        POST /api/internal/sync/extraction-status-update/
+
+        Notifica a AITAX el cambio de estado de una extracción de tipo
+        tax_compliance u tax_status.
+
+        Args:
+            extraction_id: UUID de la extracción de Syntage.
+            extractor: "tax_compliance" | "tax_status".
+            status: estado actual ("finished" | "error" | "stopped").
+            rfc: RFC del contribuyente.
+
+        Returns:
+            dict con la respuesta de AITAX.
+        """
+        body = {
+            "extraction_id": extraction_id,
+            "extractor": extractor,
+            "status": status,
+            "rfc": rfc,
+        }
+        return self._post("/api/internal/sync/extraction-status-update/", body)
+
     def close(self):
         """Cierra el cliente HTTP. Llamar al terminar de usar."""
         self._client.close()

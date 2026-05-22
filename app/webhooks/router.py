@@ -3,8 +3,10 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.requests import ClientDisconnect
 
 from app.config import settings
 from app.database import get_db
@@ -32,7 +34,17 @@ async def receive_syntage_webhook(
     """
     Endpoint público que Syntage llama cada vez que ocurre un evento.
     """
-    raw_body = await request.body()
+    try:
+        raw_body = await request.body()
+    except ClientDisconnect:
+        # Syntage cerró la conexión antes de terminar de enviar el body.
+        # Ocurre bajo carga alta (ej. ngrok free tier con muchas solicitudes simultáneas).
+        # No hay nada que procesar ni responder — solo registramos y salimos limpio.
+        logger.warning(
+            "Syntage desconectó antes de enviar el body completo. "
+            "Posible límite de conexiones del túnel ngrok bajo carga alta."
+        )
+        return JSONResponse(status_code=200, content={"status": "disconnected"})
 
     is_valid, error, syntage_timestamp = verify_syntage_signature(
         raw_body=raw_body,

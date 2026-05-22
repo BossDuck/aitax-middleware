@@ -4,20 +4,23 @@ Despacha eventos de webhook al método correcto del cliente Syntage.
 Diseño:
 - Solo procesamos eventos `extraction.created` y `extraction.updated`.
 - Hacemos GET a /extractions/{id} para obtener detalles completos.
-- Filtramos:
-    - status == "finished" (solo extracciones que terminaron OK)
-    - extractor == "invoice" (solo extracciones de facturas)
+- Filtramos por extractor y por status terminal, con dos rutas:
+
+    Ruta A — invoice:
+        extractor == "invoice" AND status == "finished"
+        → ExtractionResult(action=ACTION_NOTIFY_COMPLETED)
+
+    Ruta B — documentos fiscales:
+        extractor IN {"tax_compliance", "tax_status"}
+        AND status IN {"finished", "error", "stopped"}
+        → ExtractionResult(action=ACTION_NOTIFY_STATUS_UPDATE)
+
 - Si no cumple filtros → ExtractionNotRelevantError (evento → SKIPPED).
-- Si pasa filtros → devolvemos la extracción para que el worker la mande a AITAX.
-
-Eventos que NOS interesan:
-    extraction.created (raro, pero por si Syntage los manda al iniciar)
-    extraction.updated (la mayoría — incluye transiciones de estado)
-
-Eventos que NO procesamos (ej. invoice.*, payment.*) → UnsupportedEventTypeError.
+- Eventos de otro tipo (invoice.*, payment.*, etc.) → UnsupportedEventTypeError.
 """
 
 import logging
+from dataclasses import dataclass
 from uuid import UUID
 
 from app.syntage.client import SyntageClient
@@ -26,18 +29,42 @@ from app.syntage.client import SyntageClient
 logger = logging.getLogger(__name__)
 
 
-# ─── Configuración de filtros ─────────────────────────────────────────
+# ─── Configuración de eventos soportados ─────────────────────────────
 
 SUPPORTED_EVENTS = frozenset({
     "extraction.created",
     "extraction.updated",
 })
 
-# Solo procesamos extracciones que YA TERMINARON correctamente.
-RELEVANT_STATUS = "finished"
+# ─── Ruta A: facturas ─────────────────────────────────────────────────
 
-# Solo procesamos extracciones de facturas (no tax_returns, retentions, etc.).
-RELEVANT_EXTRACTOR = "invoice"
+INVOICE_EXTRACTOR = "invoice"
+INVOICE_RELEVANT_STATUS = "finished"
+
+# ─── Ruta B: documentos fiscales ─────────────────────────────────────
+
+TAX_DOC_EXTRACTORS = frozenset({"tax_compliance", "tax_status"})
+# Solo notificamos estados terminales; running/pending son ruido.
+TAX_DOC_RELEVANT_STATUSES = frozenset({"finished", "error", "stopped"})
+
+# ─── Acciones que la tarea debe ejecutar ─────────────────────────────
+
+ACTION_NOTIFY_COMPLETED = "notify_completed"        # → POST extraction-completed
+ACTION_NOTIFY_STATUS_UPDATE = "notify_status_update"  # → POST extraction-status-update
+
+
+# ─── Resultado del router ─────────────────────────────────────────────
+
+@dataclass
+class ExtractionResult:
+    """
+    Resultado de fetch_extraction_for_event.
+
+    extraction: dict completo devuelto por Syntage (ya validado).
+    action:     constante ACTION_* que indica qué endpoint de AITAX llamar.
+    """
+    extraction: dict
+    action: str
 
 
 # ─── Excepciones ──────────────────────────────────────────────────────
@@ -54,8 +81,8 @@ class InvalidEventPayloadError(ValueError):
 
 class ExtractionNotRelevantError(Exception):
     """
-    La extracción existe pero no nos interesa (ej. status=running,
-    extractor=tax_return). NO es un error técnico, es filtrado normal.
+    La extracción existe pero no nos interesa (extractor desconocido,
+    status no terminal, etc.). NO es un error técnico, es filtrado normal.
     El worker la marcará como SKIPPED.
     """
     pass
@@ -73,7 +100,6 @@ def extract_resource_id(payload: dict, event_type: str) -> UUID:
     Extrae el UUID del recurso afectado desde el campo `resource` del payload.
 
     Para eventos extraction.*, resource viene como "/extractions/<uuid>".
-
     """
     resource_iri = payload.get("resource")
 
@@ -104,10 +130,10 @@ def fetch_extraction_for_event(
     client: SyntageClient,
     event_type: str,
     payload: dict,
-) -> dict:
+) -> ExtractionResult:
     """
     Punto de entrada principal: dado un evento, llama a Syntage,
-    aplica filtros y devuelve la extracción si nos interesa procesarla.
+    aplica filtros y devuelve un ExtractionResult si nos interesa procesarla.
 
     Args:
         client: instancia de SyntageClient.
@@ -115,16 +141,12 @@ def fetch_extraction_for_event(
         payload: dict del payload del webhook.
 
     Returns:
-        dict con la extracción de Syntage. Garantizado:
-        - status == "finished"
-        - extractor == "invoice"
-        - taxpayer.id (RFC) presente
+        ExtractionResult con la extracción validada y la acción a ejecutar.
 
     Raises:
         UnsupportedEventTypeError: el evento no es extraction.*.
         InvalidEventPayloadError: no se puede extraer extraction_id del payload.
-        ExtractionNotRelevantError: la extracción existe pero no pasa filtros
-                                    (status != finished o extractor != invoice).
+        ExtractionNotRelevantError: la extracción existe pero no pasa filtros.
         MissingTaxpayerError: la extracción no trae taxpayer.id.
         SyntageRetryableError / SyntageDefinitiveError: errores HTTP.
     """
@@ -144,21 +166,8 @@ def fetch_extraction_for_event(
 
     extraction = client.fetch_extraction(extraction_id)
 
-    # ─── Filtro 1: status ─────────────────────────────────────────────
     status = extraction.get("status")
-    if status != RELEVANT_STATUS:
-        raise ExtractionNotRelevantError(
-            f"Extracción {extraction_id} tiene status='{status}', "
-            f"esperábamos '{RELEVANT_STATUS}'. Saltando."
-        )
-
-    # ─── Filtro 2: extractor ──────────────────────────────────────────
     extractor = extraction.get("extractor")
-    if extractor != RELEVANT_EXTRACTOR:
-        raise ExtractionNotRelevantError(
-            f"Extracción {extraction_id} tiene extractor='{extractor}', "
-            f"esperábamos '{RELEVANT_EXTRACTOR}'. Saltando."
-        )
 
     # ─── Validación: taxpayer.id (RFC) presente ───────────────────────
     taxpayer = extraction.get("taxpayer") or {}
@@ -169,17 +178,45 @@ def fetch_extraction_for_event(
             f"taxpayer={taxpayer}"
         )
 
-    logger.info(
-        "Extracción %s lista para sync: RFC=%s, finishedAt=%s, "
-        "createdDataPoints=%s, updatedDataPoints=%s",
-        extraction_id,
-        rfc,
-        extraction.get("finishedAt"),
-        extraction.get("createdDataPoints"),
-        extraction.get("updatedDataPoints"),
-    )
+    # ─── Ruta A: facturas ─────────────────────────────────────────────
+    if extractor == INVOICE_EXTRACTOR:
+        if status != INVOICE_RELEVANT_STATUS:
+            raise ExtractionNotRelevantError(
+                f"Extracción {extraction_id} (invoice) tiene status='{status}', "
+                f"esperábamos '{INVOICE_RELEVANT_STATUS}'. Saltando."
+            )
+        logger.info(
+            "Extracción %s lista para sync-completed: RFC=%s, finishedAt=%s, "
+            "createdDataPoints=%s, updatedDataPoints=%s",
+            extraction_id,
+            rfc,
+            extraction.get("finishedAt"),
+            extraction.get("createdDataPoints"),
+            extraction.get("updatedDataPoints"),
+        )
+        return ExtractionResult(extraction=extraction, action=ACTION_NOTIFY_COMPLETED)
 
-    return extraction
+    # ─── Ruta B: documentos fiscales ─────────────────────────────────
+    if extractor in TAX_DOC_EXTRACTORS:
+        if status not in TAX_DOC_RELEVANT_STATUSES:
+            raise ExtractionNotRelevantError(
+                f"Extracción {extraction_id} ({extractor}) tiene status='{status}', "
+                f"no es un estado terminal {sorted(TAX_DOC_RELEVANT_STATUSES)}. Saltando."
+            )
+        logger.info(
+            "Extracción %s lista para status-update: extractor=%s, status=%s, RFC=%s",
+            extraction_id,
+            extractor,
+            status,
+            rfc,
+        )
+        return ExtractionResult(extraction=extraction, action=ACTION_NOTIFY_STATUS_UPDATE)
+
+    # ─── Extractor desconocido ────────────────────────────────────────
+    raise ExtractionNotRelevantError(
+        f"Extracción {extraction_id} tiene extractor='{extractor}', "
+        f"no está en los extractores soportados. Saltando."
+    )
 
 
 def get_taxpayer_rfc(extraction: dict) -> str:

@@ -130,7 +130,8 @@ def test_full_flow_finished_invoice_extraction_marks_processed(eager_celery, db_
     assert result["status"] == "processed"
     assert result["rfc"] == "PEIC211118IS0"
     assert result["extraction_id"] == str(extraction_id)
-    assert "aitax_results" in result
+    assert result["action"] == "notify_completed"
+    assert "aitax_result" in result
 
     # Verifica que se llamó a AITAX con los argumentos correctos
     aitax_instance.notify_extraction_completed.assert_called_once_with(
@@ -169,8 +170,8 @@ def test_non_finished_extraction_marks_skipped_no_aitax_call(eager_celery, db_se
     assert refreshed.status == EventStatus.SKIPPED.value
 
 
-@pytest.mark.parametrize("extractor", ["monthly_tax_return", "tax_status", "rpc"])
-def test_non_invoice_extractor_marks_skipped(eager_celery, db_session, extractor):
+@pytest.mark.parametrize("extractor", ["monthly_tax_return", "rpc"])
+def test_unsupported_extractor_marks_skipped(eager_celery, db_session, extractor):
     event, extraction_id = _make_extraction_event(db_session)
 
     with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
@@ -376,3 +377,74 @@ def test_missing_event_returns_not_found(eager_celery, db_session):
         result = process_webhook_event.apply(args=[str(fake_id)]).get()
 
     assert result["status"] == "not_found"
+
+
+# ─── Ruta B: tax_compliance / tax_status ─────────────────────────────
+
+@pytest.mark.parametrize("extractor", ["tax_compliance", "tax_status"])
+@pytest.mark.parametrize("status", ["finished", "error", "stopped"])
+def test_tax_doc_terminal_status_calls_status_update_endpoint(
+    eager_celery, db_session, extractor, status
+):
+    """tax_compliance/tax_status en estado terminal → notify_extraction_status_update."""
+    event, extraction_id = _make_extraction_event(db_session)
+
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
+        syntage_instance = MockSyntage.return_value.__enter__.return_value
+        syntage_instance.fetch_extraction.return_value = _fake_extraction(
+            extraction_id, status=status, extractor=extractor
+        )
+
+        aitax_instance = MockAitax.return_value.__enter__.return_value
+        aitax_instance.notify_extraction_status_update.return_value = {
+            "status": "ok",
+            "extraction_id": str(extraction_id),
+            "extractor": extractor,
+        }
+
+        from app.tasks.process_event import process_webhook_event
+        result = process_webhook_event.apply(args=[str(event.id)]).get()
+
+    assert result["status"] == "processed"
+    assert result["action"] == "notify_status_update"
+    assert result["extractor"] == extractor
+    assert result["extraction_status"] == status
+
+    aitax_instance.notify_extraction_status_update.assert_called_once_with(
+        extraction_id=str(extraction_id),
+        extractor=extractor,
+        status=status,
+        rfc="PEIC211118IS0",
+    )
+    aitax_instance.notify_extraction_completed.assert_not_called()
+
+    db_session.expire_all()
+    assert db_session.get(SyntageWebhookEvent, event.id).status == EventStatus.PROCESSED.value
+
+
+@pytest.mark.parametrize("extractor", ["tax_compliance", "tax_status"])
+@pytest.mark.parametrize("non_terminal_status", ["pending", "running"])
+def test_tax_doc_non_terminal_status_marks_skipped(
+    eager_celery, db_session, extractor, non_terminal_status
+):
+    """tax_compliance/tax_status en estado no terminal → SKIPPED, sin llamar a AITAX."""
+    event, extraction_id = _make_extraction_event(db_session)
+
+    with patch("app.tasks.process_event.SyntageClient") as MockSyntage, \
+         patch("app.tasks.process_event.AitaxClient") as MockAitax:
+
+        syntage_instance = MockSyntage.return_value.__enter__.return_value
+        syntage_instance.fetch_extraction.return_value = _fake_extraction(
+            extraction_id, status=non_terminal_status, extractor=extractor
+        )
+
+        from app.tasks.process_event import process_webhook_event
+        result = process_webhook_event.apply(args=[str(event.id)]).get()
+
+    assert result["status"] == "skipped"
+    MockAitax.assert_not_called()
+
+    db_session.expire_all()
+    assert db_session.get(SyntageWebhookEvent, event.id).status == EventStatus.SKIPPED.value

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     AITAX_INTERNAL_API_URL: str = "http://localhost:8000"
     AITAX_INTERNAL_API_TOKEN: str = ""
-    AITAX_INTERNAL_API_TIMEOUT: int = 600
+    AITAX_INTERNAL_API_TIMEOUT: int = 3600
 
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_TASK_ALWAYS_EAGER: bool = False

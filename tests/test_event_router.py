@@ -4,7 +4,10 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.syntage.event_router import (
+    ACTION_NOTIFY_COMPLETED,
+    ACTION_NOTIFY_STATUS_UPDATE,
     SUPPORTED_EVENTS,
+    TAX_DOC_EXTRACTORS,
     ExtractionNotRelevantError,
     InvalidEventPayloadError,
     MissingTaxpayerError,
@@ -100,9 +103,10 @@ def test_fetch_extraction_for_event_finished_invoice_passes():
     result = fetch_extraction_for_event(client, "extraction.updated", payload)
 
     client.fetch_extraction.assert_called_once_with(extraction_id)
-    assert result["status"] == "finished"
-    assert result["extractor"] == "invoice"
-    assert result["taxpayer"]["id"] == "PEIC211118IS0"
+    assert result.action == ACTION_NOTIFY_COMPLETED
+    assert result.extraction["status"] == "finished"
+    assert result.extraction["extractor"] == "invoice"
+    assert result.extraction["taxpayer"]["id"] == "PEIC211118IS0"
 
 
 def test_fetch_extraction_for_event_works_for_extraction_created():
@@ -145,20 +149,20 @@ def test_non_finished_status_raises_not_relevant(non_finished_status):
 # ─── Filtros: extractor ───────────────────────────────────────────────
 
 @pytest.mark.parametrize(
-    "non_invoice_extractor",
+    "unsupported_extractor",
     [
         "monthly_tax_return",
         "annual_tax_return",
-        "tax_status",
         "tax_retention",
         "rpc",
     ],
 )
-def test_non_invoice_extractor_raises_not_relevant(non_invoice_extractor):
+def test_unsupported_extractor_raises_not_relevant(unsupported_extractor):
+    """Extractores que no son invoice ni tax_doc → SKIPPED."""
     extraction_id = uuid4()
     client = MagicMock()
     client.fetch_extraction.return_value = _make_extraction(
-        extraction_id, extractor=non_invoice_extractor
+        extraction_id, extractor=unsupported_extractor
     )
 
     payload = {
@@ -166,8 +170,56 @@ def test_non_invoice_extractor_raises_not_relevant(non_invoice_extractor):
         "resource": f"/extractions/{extraction_id}",
     }
 
-    with pytest.raises(ExtractionNotRelevantError, match=non_invoice_extractor):
+    with pytest.raises(ExtractionNotRelevantError):
         fetch_extraction_for_event(client, "extraction.updated", payload)
+
+
+# ─── Ruta B: tax_compliance / tax_status ─────────────────────────────
+
+@pytest.mark.parametrize("extractor", ["tax_compliance", "tax_status"])
+@pytest.mark.parametrize("status", ["finished", "error", "stopped"])
+def test_tax_doc_terminal_status_returns_status_update_action(extractor, status):
+    """tax_compliance/tax_status en estado terminal → ACTION_NOTIFY_STATUS_UPDATE."""
+    extraction_id = uuid4()
+    client = MagicMock()
+    client.fetch_extraction.return_value = _make_extraction(
+        extraction_id, status=status, extractor=extractor
+    )
+
+    payload = {
+        "type": "extraction.updated",
+        "resource": f"/extractions/{extraction_id}",
+    }
+
+    result = fetch_extraction_for_event(client, "extraction.updated", payload)
+
+    assert result.action == ACTION_NOTIFY_STATUS_UPDATE
+    assert result.extraction["extractor"] == extractor
+    assert result.extraction["status"] == status
+
+
+@pytest.mark.parametrize("extractor", ["tax_compliance", "tax_status"])
+@pytest.mark.parametrize("non_terminal_status", ["pending", "running"])
+def test_tax_doc_non_terminal_status_raises_not_relevant(extractor, non_terminal_status):
+    """tax_compliance/tax_status en estado no terminal → SKIPPED."""
+    extraction_id = uuid4()
+    client = MagicMock()
+    client.fetch_extraction.return_value = _make_extraction(
+        extraction_id, status=non_terminal_status, extractor=extractor
+    )
+
+    payload = {
+        "type": "extraction.updated",
+        "resource": f"/extractions/{extraction_id}",
+    }
+
+    with pytest.raises(ExtractionNotRelevantError):
+        fetch_extraction_for_event(client, "extraction.updated", payload)
+
+
+def test_tax_doc_extractors_set_contains_expected():
+    assert "tax_compliance" in TAX_DOC_EXTRACTORS
+    assert "tax_status" in TAX_DOC_EXTRACTORS
 
 
 # ─── Validación: taxpayer ─────────────────────────────────────────────
