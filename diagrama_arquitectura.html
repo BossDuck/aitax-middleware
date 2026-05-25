@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Arquitectura Técnica — aitax-webhooks</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;padding:32px 40px;min-width:1600px}
+h1{font-size:20px;font-weight:700;color:#e6edf3;margin-bottom:4px}
+.subtitle{font-size:12px;color:#8b949e;margin-bottom:20px}
+
+/* legend */
+.legend{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:24px}
+.legend-item{display:flex;align-items:center;gap:6px;font-size:11px;color:#8b949e}
+.ldot{width:10px;height:10px;border-radius:50%}
+
+/* diagram wrapper (SVG overlay parent) */
+#diagram-wrap{position:relative}
+#arrows{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:200;overflow:visible}
+
+/* layer label */
+.lbl{font-size:9px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase;color:#6e7681;margin-bottom:8px}
+
+/* ── External actors ── */
+.ext-row{display:grid;grid-template-columns:1.6fr 1fr 1.3fr;gap:16px;margin-bottom:16px}
+.ext-card{border-radius:10px;padding:14px 18px;border:1px solid}
+.ext-card.proveedor{background:#111d2e;border-color:#388bfd55;color:#79c0ff}
+.ext-card.redis{background:#1e1610;border-color:#ffa65755;color:#ffa657}
+.ext-card.django{background:#0f1e14;border-color:#56d36455;color:#56d364}
+.ext-icon{font-size:20px;margin-bottom:6px}
+.ext-title{font-size:13px;font-weight:700;margin-bottom:3px}
+.ext-sub{font-size:10px;opacity:.65;margin-bottom:8px}
+.ext-eps{font-size:9.5px;font-family:'Cascadia Code','Fira Code',monospace;line-height:1.9;opacity:.8}
+
+/* ── Microservice container ── */
+.ms-box{border:2px solid #388bfd55;border-radius:14px;background:#161b22;padding:18px;margin-bottom:16px;position:relative}
+.ms-badge{position:absolute;top:-12px;left:20px;background:#388bfd;color:#fff;font-size:10px;font-weight:700;letter-spacing:.8px;padding:2px 12px;border-radius:5px;text-transform:uppercase}
+
+/* ── Sections inside MS ── */
+.section{border-radius:10px;padding:14px 16px;margin-bottom:14px;border:1px solid}
+.section.api{background:#111d2e;border-color:#388bfd33}
+.section.worker{background:#1e1610;border-color:#ffa65733}
+.section.clients{background:#0f1510;border-color:#56d36433}
+.section.infra{background:#141020;border-color:#8b5cf633}
+.sec-title{font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #21262d}
+.section.api .sec-title{color:#79c0ff}
+.section.worker .sec-title{color:#ffa657}
+.section.clients .sec-title{color:#56d364}
+.section.infra .sec-title{color:#d2a8ff}
+
+/* ── Module cards ── */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+.mod{background:#0d1117;border-radius:8px;padding:11px 13px;border:1px solid #21262d;position:relative}
+.mod.hl{border-color:#388bfd44}
+.mod.hlw{border-color:#ffa65744}
+.mod.hlg{border-color:#56d36444}
+.mod.hlp{border-color:#d2a8ff44}
+.mod-name{font-size:11px;font-weight:700;font-family:'Cascadia Code','Fira Code',monospace;margin-bottom:5px;color:#e6edf3}
+.mod-role{font-size:9.5px;color:#8b949e;margin-bottom:6px;line-height:1.4}
+.mod-items{list-style:none;font-size:9px;font-family:'Cascadia Code','Fira Code',monospace;color:#6e7681;line-height:1.75}
+.mod-items li::before{content:'› ';color:#388bfd}
+.tag{display:inline-block;font-size:8px;font-weight:700;padding:1px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:.4px;margin-top:4px}
+.t-api{background:#1f4b8e;color:#79c0ff}
+.t-wk{background:#6e2d00;color:#ffa657}
+.t-cl{background:#1a3d2e;color:#56d364}
+.t-db{background:#3d1f6e;color:#d2a8ff}
+.t-cfg{background:#3d3000;color:#e3b341}
+
+/* ── DB container ── */
+.db-box{border:2px solid #8b5cf655;border-radius:14px;background:#161b22;padding:18px;margin-bottom:16px;position:relative}
+.db-badge{position:absolute;top:-12px;left:20px;background:#8b5cf6;color:#fff;font-size:10px;font-weight:700;letter-spacing:.8px;padding:2px 12px;border-radius:5px;text-transform:uppercase}
+.tbl{background:#0d1117;border:1px solid #8b5cf644;border-radius:8px;padding:11px 13px}
+.tbl-name{font-family:'Cascadia Code','Fira Code',monospace;font-size:10.5px;font-weight:700;color:#d2a8ff;margin-bottom:4px}
+.tbl-owner{font-size:8.5px;color:#6e7681;margin-bottom:6px}
+.tbl-cols{list-style:none;font-size:8.5px;font-family:'Cascadia Code','Fira Code',monospace;color:#6e7681;line-height:1.8}
+.tbl-cols .pk::before{content:'🔑 ';color:#e3b341}
+.tbl-cols .fk{color:#79c0ff}
+.tbl-cols li:not(.pk)::before{content:'· '}
+
+/* ── Flow section ── */
+.flow-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-top:16px}
+.flow-card{background:#161b22;border-radius:10px;padding:14px 16px;border:1px solid #30363d}
+.flow-title{font-size:10px;font-weight:700;margin-bottom:10px}
+.flow-step{display:flex;align-items:flex-start;gap:8px;margin-bottom:7px}
+.snum{background:#388bfd;color:#fff;border-radius:50%;width:16px;height:16px;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;flex-shrink:0;margin-top:1px}
+.snum.o{background:#ffa657}
+.snum.p{background:#8b5cf6}
+.stext{font-size:10px;color:#c9d1d9;line-height:1.45}
+.stext code{font-family:'Cascadia Code','Fira Code',monospace;background:#0d1117;padding:0 4px;border-radius:3px;font-size:9px;color:#79c0ff}
+</style>
+</head>
+<body>
+
+<h1>Arquitectura Técnica — aitax-webhooks</h1>
+<p class="subtitle">Microservicio de recepción y procesamiento de webhooks · FastAPI + Celery + PostgreSQL compartida con AITAX · Actualizado 2026-05-25</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="ldot" style="background:#388bfd"></div>FastAPI / HTTP</div>
+  <div class="legend-item"><div class="ldot" style="background:#ffa657"></div>Celery Worker</div>
+  <div class="legend-item"><div class="ldot" style="background:#56d364"></div>Clientes HTTP + Sync</div>
+  <div class="legend-item"><div class="ldot" style="background:#d2a8ff"></div>Base de Datos</div>
+  <div class="legend-item"><div class="ldot" style="background:#e3b341"></div>Configuración</div>
+  <div class="legend-item"><div class="ldot" style="background:#f85149"></div>Seguridad</div>
+</div>
+
+<div id="diagram-wrap">
+<svg id="arrows"></svg>
+
+<!-- ── ROW 1: External actors ── -->
+<div class="lbl">Servicios Externos</div>
+<div class="ext-row">
+
+  <div class="ext-card proveedor" id="ext-proveedor">
+    <div class="ext-icon">☁️</div>
+    <div class="ext-title">API de Extracción SAT</div>
+    <div class="ext-sub">Fuente de webhooks y datos SAT · Proveedor externo</div>
+    <div class="ext-eps">
+      → POST /webhooks/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<em style="color:#6e7681">(proveedor envía)</em><br>
+      ← GET /extractions/{id}&nbsp;&nbsp;&nbsp;&nbsp;<em style="color:#6e7681">(microservicio consulta)</em><br>
+      ← GET /extractions/{id}/invoices<br>
+      ← GET /extractions/{id}/concepts<br>
+      ← GET /extractions/{id}/payments<br>
+      ← GET /extractions/{id}/batch_payments
+    </div>
+  </div>
+
+  <div class="ext-card redis" id="ext-redis">
+    <div class="ext-icon">⚡</div>
+    <div class="ext-title">Redis / Memurai</div>
+    <div class="ext-sub">Broker de mensajes Celery · Windows: Memurai</div>
+    <div class="ext-eps">
+      redis://localhost:6379/0<br>
+      backend: rpc://<br>
+      --pool=solo (obligatorio Windows)<br>
+      acks_late=True<br>
+      retry_backoff_max=600s
+    </div>
+  </div>
+
+  <div class="ext-card django" id="ext-django">
+    <div class="ext-icon">🦄</div>
+    <div class="ext-title">AITAX · Django (Monolito)</div>
+    <div class="ext-sub">Solo notificaciones tax_status / tax_compliance + ExtractionSyncStatus</div>
+    <div class="ext-eps">
+      POST /api/internal/sync/sync-started/<br>
+      POST /api/internal/sync/extraction-completed/<br>
+      POST /api/internal/sync/extraction-status-update/<br>
+      Auth: Bearer token (AITAX_INTERNAL_API_TOKEN)
+    </div>
+  </div>
+
+</div><!-- ext-row -->
+
+<!-- ── ROW 2: Microservice ── -->
+<div class="lbl">Microservicio — aitax-webhooks</div>
+<div class="ms-box" id="ms-box">
+  <div class="ms-badge">aitax-webhooks · uvicorn :8001 + celery worker</div>
+
+  <!-- FastAPI section -->
+  <div class="section api">
+    <div class="sec-title">🌐 Capa HTTP — FastAPI (uvicorn :8001)</div>
+    <div class="grid4">
+
+      <div class="mod hl" id="mod-main">
+        <div class="mod-name">main.py</div>
+        <div class="mod-role">Entrypoint FastAPI</div>
+        <ul class="mod-items">
+          <li>Crea instancia FastAPI</li>
+          <li>Incluye webhooks router</li>
+          <li>Configura logging</li>
+        </ul>
+        <span class="tag t-api">ENTRYPOINT</span>
+      </div>
+
+      <div class="mod hl" id="mod-router">
+        <div class="mod-name">webhooks/router.py</div>
+        <div class="mod-role">POST /webhooks/ — responde &lt;1s</div>
+        <ul class="mod-items">
+          <li>Valida firma HMAC-SHA256</li>
+          <li>Guarda en DB (idempotente)</li>
+          <li>Encola tarea Celery</li>
+          <li>Retorna 200 OK inmediato</li>
+          <li>Captura ClientDisconnect</li>
+          <li>Rechaza duplicados silencioso</li>
+        </ul>
+        <span class="tag t-api">ENDPOINT</span>
+      </div>
+
+      <div class="mod" id="mod-sig">
+        <div class="mod-name">webhooks/signature.py</div>
+        <div class="mod-role">Validación HMAC-SHA256</div>
+        <ul class="mod-items">
+          <li>Header x-satws-signature</li>
+          <li>Tolerancia timestamp 300s</li>
+          <li>401 si firma inválida</li>
+          <li>Secret distinto sandbox/prod</li>
+        </ul>
+        <span class="tag" style="background:#4d0f0f;color:#f85149">SECURITY</span>
+      </div>
+
+      <div class="mod" id="mod-schemas">
+        <div class="mod-name">webhooks/schemas.py</div>
+        <div class="mod-role">Modelos Pydantic del payload</div>
+        <ul class="mod-items">
+          <li>WebhookPayload</li>
+          <li>Validación body JSON</li>
+          <li>400 si JSON inválido</li>
+        </ul>
+        <span class="tag t-api">SCHEMA</span>
+      </div>
+
+    </div>
+  </div><!-- api section -->
+
+  <!-- Celery section -->
+  <div class="section worker">
+    <div class="sec-title">⚙️ Capa Worker — Celery</div>
+    <div class="grid2">
+
+      <div class="mod" id="mod-celery">
+        <div class="mod-name">celery_app.py</div>
+        <div class="mod-role">Configuración del broker y worker</div>
+        <ul class="mod-items">
+          <li>Broker: Redis (REDIS_URL)</li>
+          <li>Backend: rpc://</li>
+          <li>acks_late=True (solo ack tras éxito)</li>
+          <li>Autodiscover: app.tasks</li>
+          <li>Serializer: json</li>
+        </ul>
+        <span class="tag t-wk">BROKER CFG</span>
+      </div>
+
+      <div class="mod hlw" id="mod-task">
+        <div class="mod-name">tasks/process_event.py</div>
+        <div class="mod-role">Tarea principal — orquesta procesamiento end-to-end</div>
+        <ul class="mod-items">
+          <li>max_retries=3, backoff_base=60s, tope=10min</li>
+          <li>autoretry_for=(ProveedorRetryableError, AitaxRetryableError)</li>
+          <li>Lee WebhookEvent de DB</li>
+          <li>Invoca event_router → fetch_extraction_for_event()</li>
+          <li>Idempotencia por extraction_id (query DB)</li>
+          <li>Ruta A: query Company → sync_all() → rebind_fks()</li>
+          <li>Ruta B: notify_extraction_status_update()</li>
+          <li>Marca PROCESSED / FAILED / SKIPPED en DB</li>
+        </ul>
+        <span class="tag t-wk">TASK</span>
+      </div>
+
+    </div>
+  </div><!-- worker section -->
+
+  <!-- Clients + Sync section -->
+  <div class="section clients">
+    <div class="sec-title">🔌 Clientes HTTP + Motor de Sincronización</div>
+    <div class="grid3">
+
+      <div class="mod" id="mod-proveedor-client">
+        <div class="mod-name">proveedor/client.py</div>
+        <div class="mod-role">Cliente HTTP hacia API de extracción SAT</div>
+        <ul class="mod-items">
+          <li>GET /extractions/{id} → estado actual</li>
+          <li>httpx.Client (síncrono)</li>
+          <li>Tenacity: 3 reintentos internos</li>
+          <li>wait_exponential 2s→30s</li>
+          <li>ProveedorRetryableError (5xx, timeout)</li>
+          <li>ProveedorDefinitiveError (4xx)</li>
+          <li>Bearer: PROVEEDOR_API_KEY</li>
+        </ul>
+        <span class="tag t-cl">HTTP CLIENT</span>
+      </div>
+
+      <div class="mod" id="mod-data-client">
+        <div class="mod-name">proveedor/data_client.py</div>
+        <div class="mod-role">Paginación Hydra cursor-based</div>
+        <ul class="mod-items">
+          <li>get_invoices_by_year(year)</li>
+          <li>get_concepts()</li>
+          <li>get_batch_payments()</li>
+          <li>get_payments()</li>
+          <li>Cursor: hydra:next en @context</li>
+          <li>Itera hasta no haber más páginas</li>
+        </ul>
+        <span class="tag t-cl">PAGINATION</span>
+      </div>
+
+      <div class="mod" id="mod-event-router">
+        <div class="mod-name">proveedor/event_router.py</div>
+        <div class="mod-role">Decisión de ruta de procesamiento</div>
+        <ul class="mod-items">
+          <li>fetch_extraction_for_event()</li>
+          <li>get_taxpayer_rfc(extraction)</li>
+          <li>Filtra: status solo terminales</li>
+          <li>finished / error / stopped</li>
+          <li>ACTION_NOTIFY_COMPLETED</li>
+          <li>ACTION_NOTIFY_STATUS_UPDATE</li>
+          <li>ExtractionNotRelevantError → SKIP</li>
+        </ul>
+        <span class="tag t-cl">ROUTER</span>
+      </div>
+
+      <div class="mod" id="mod-aitax-client">
+        <div class="mod-name">aitax/client.py</div>
+        <div class="mod-role">Cliente HTTP hacia AITAX (Django)</div>
+        <ul class="mod-items">
+          <li>notify_sync_started(rfc, extraction_id)</li>
+          <li>notify_extraction_completed(rfc, extraction_id)</li>
+          <li>notify_extraction_status_update(...)</li>
+          <li>Tenacity: 3 reintentos</li>
+          <li>AitaxRetryableError (5xx, timeout)</li>
+          <li>AitaxDefinitiveError (4xx)</li>
+          <li>Bearer: AITAX_INTERNAL_API_TOKEN</li>
+        </ul>
+        <span class="tag t-cl">HTTP CLIENT</span>
+      </div>
+
+      <div class="mod hlg" id="mod-sync">
+        <div class="mod-name">sync/sync.py</div>
+        <div class="mod-role">Motor de sync directa a PostgreSQL</div>
+        <ul class="mod-items">
+          <li>sync_all(company) — punto de entrada</li>
+          <li>ThreadPoolExecutor(max_workers=3)</li>
+          <li>sync_invoices_by_year(year) × N años</li>
+          <li>sync_concepts() en paralelo</li>
+          <li>sync_payments() en paralelo</li>
+          <li>rebind_orphan_fks() — repara FKs nulas</li>
+          <li>_flush_invoices/concepts/payments()</li>
+          <li>pg_insert().on_conflict_do_update() upsert</li>
+          <li>_trunc(val, max_len) — respeta VARCHAR limits</li>
+          <li>created_at excluido del UPDATE (auto_now_add)</li>
+        </ul>
+        <span class="tag t-cl">SYNC ENGINE</span>
+      </div>
+
+      <div class="mod" id="mod-config">
+        <div class="mod-name">config.py</div>
+        <div class="mod-role">Configuración pydantic-settings (.env)</div>
+        <ul class="mod-items">
+          <li>DB_HOST/PORT/NAME/USER/PASSWORD</li>
+          <li>PROVEEDOR_API_URL / API_KEY</li>
+          <li>PROVEEDOR_WEBHOOK_SIGNING_SECRET ⚠️</li>
+          <li>PROVEEDOR_WEBHOOK_TOLERANCE (300s)</li>
+          <li>AITAX_INTERNAL_API_URL / TOKEN</li>
+          <li>AITAX_INTERNAL_API_TIMEOUT (3600s)</li>
+          <li>REDIS_URL</li>
+        </ul>
+        <span class="tag t-cfg">CONFIG</span>
+      </div>
+
+    </div>
+  </div><!-- clients section -->
+
+  <!-- Infra / Models section -->
+  <div class="section infra">
+    <div class="sec-title">🗄️ Modelos SQLAlchemy + Migraciones</div>
+    <div class="grid4">
+
+      <div class="mod" id="mod-database">
+        <div class="mod-name">database.py</div>
+        <div class="mod-role">Engine + SessionLocal + Base</div>
+        <ul class="mod-items">
+          <li>create_engine (PostgreSQL)</li>
+          <li>pool_size=10, max_overflow=20</li>
+          <li>Base(DeclarativeBase) → Alembic</li>
+          <li>AitaxBase separada → NO Alembic</li>
+          <li>SessionLocal (por tarea Celery)</li>
+        </ul>
+        <span class="tag t-db">DB ENGINE</span>
+      </div>
+
+      <div class="mod" id="mod-models">
+        <div class="mod-name">models.py</div>
+        <div class="mod-role">Tabla propia del microservicio (usa Base)</div>
+        <ul class="mod-items">
+          <li>WebhookEvent</li>
+          <li>provider_event_id UUID UNIQUE</li>
+          <li>event_type, payload JSONB</li>
+          <li>status, attempts, last_error</li>
+          <li>received_at, processed_at</li>
+          <li>EventStatus enum (PENDING→PROCESSED)</li>
+        </ul>
+        <span class="tag t-db">MODEL</span>
+      </div>
+
+      <div class="mod hlp" id="mod-aitax-models">
+        <div class="mod-name">aitax_models.py</div>
+        <div class="mod-role">Tablas AITAX (usa AitaxBase — Alembic NUNCA toca)</div>
+        <ul class="mod-items">
+          <li>Company (companies_company)</li>
+          <li>InvoiceCache + InvoiceTag + InvoiceRelation</li>
+          <li>ConceptCache + ConceptTax</li>
+          <li>BatchPaymentCache + BatchPaymentBank</li>
+          <li>PaymentCache</li>
+          <li>created_at NOT NULL en 4 modelos</li>
+        </ul>
+        <span class="tag t-db">AITAX MODELS</span>
+      </div>
+
+      <div class="mod" id="mod-alembic">
+        <div class="mod-name">alembic/</div>
+        <div class="mod-role">Migraciones — solo tabla propia</div>
+        <ul class="mod-items">
+          <li>env.py importa solo Base (no AitaxBase)</li>
+          <li>Crea webhook_events</li>
+          <li>NUNCA toca tablas Django/AITAX</li>
+          <li>alembic upgrade head</li>
+          <li>alembic revision --autogenerate</li>
+        </ul>
+        <span class="tag t-db">MIGRATIONS</span>
+      </div>
+
+    </div>
+  </div><!-- infra section -->
+
+</div><!-- ms-box -->
+
+<!-- ── ROW 3: PostgreSQL ── -->
+<div class="lbl">Base de Datos — PostgreSQL (compartida AITAX Django + Microservicio)</div>
+<div class="db-box" id="db-box">
+  <div class="db-badge">PostgreSQL · aitax_db</div>
+
+  <div style="font-size:9px;color:#8b949e;margin-bottom:10px">
+    🔵 Tabla gestionada por Alembic (microservicio) &nbsp;·&nbsp; 🟣 Tablas gestionadas por Django (AITAX) — Alembic nunca las toca
+  </div>
+
+  <div style="display:grid;grid-template-columns:1.4fr 1fr 1.2fr 1.1fr 1.1fr 1fr;gap:10px">
+
+    <div class="tbl" id="db-events">
+      <div class="tbl-name">webhook_events</div>
+      <div class="tbl-owner" style="color:#388bfd">🔵 Alembic — microservicio</div>
+      <ul class="tbl-cols">
+        <li class="pk">id UUID PK</li>
+        <li>provider_event_id UUID UNIQUE</li>
+        <li>event_type VARCHAR(100)</li>
+        <li>source VARCHAR(500)</li>
+        <li>resource VARCHAR(500)</li>
+        <li>payload JSONB</li>
+        <li>headers JSONB</li>
+        <li>status VARCHAR(20) idx</li>
+        <li>attempts INT</li>
+        <li>last_error TEXT</li>
+        <li>received_at TIMESTAMPTZ</li>
+        <li>processed_at TIMESTAMPTZ</li>
+        <li>provider_timestamp BIGINT</li>
+      </ul>
+    </div>
+
+    <div class="tbl" id="db-company">
+      <div class="tbl-name">companies_company</div>
+      <div class="tbl-owner">🟣 Django</div>
+      <ul class="tbl-cols">
+        <li class="pk">id BIGINT PK</li>
+        <li>rfc VARCHAR(13) UNIQUE</li>
+        <li>business_name VARCHAR(255)</li>
+        <li>is_active BOOL</li>
+        <li>owner_id BIGINT</li>
+        <li>entity_id VARCHAR(80)</li>
+        <li>credential_id VARCHAR(80)</li>
+        <li>created_at TIMESTAMPTZ</li>
+        <li>updated_at TIMESTAMPTZ</li>
+      </ul>
+    </div>
+
+    <div class="tbl" id="db-invoice">
+      <div class="tbl-name">sat_invoicecache &amp; sat_invoicetag &amp; sat_invoicerelation</div>
+      <div class="tbl-owner">🟣 Django</div>
+      <ul class="tbl-cols">
+        <li class="pk">id BIGINT PK</li>
+        <li class="fk">company_id FK →companies_company</li>
+        <li>provider_id UNIQUE</li>
+        <li>uuid, iri, type, status</li>
+        <li>issuer_rfc/name, receiver_rfc/name</li>
+        <li>total, subtotal, tax NUMERIC</li>
+        <li>issued_at, canceled_at TIMESTAMPTZ</li>
+        <li>created_at NOT NULL (auto_now_add)</li>
+        <li class="fk">sat_invoicetag.invoice_id FK</li>
+        <li class="fk">sat_invoicerelation.invoice_id FK</li>
+      </ul>
+    </div>
+
+    <div class="tbl" id="db-concept">
+      <div class="tbl-name">sat_conceptcache &amp; sat_concepttax</div>
+      <div class="tbl-owner">🟣 Django</div>
+      <ul class="tbl-cols">
+        <li class="pk">id BIGINT PK</li>
+        <li class="fk">company_id FK</li>
+        <li class="fk">invoice_id FK (nullable)</li>
+        <li>provider_id</li>
+        <li>description TEXT</li>
+        <li>quantity, unit_amount NUMERIC</li>
+        <li>total_amount NUMERIC</li>
+        <li>created_at NOT NULL</li>
+        <li class="fk">sat_concepttax.concept_id FK</li>
+      </ul>
+    </div>
+
+    <div class="tbl" id="db-batch">
+      <div class="tbl-name">sat_batchpaymentcache &amp; sat_batchpaymentbank</div>
+      <div class="tbl-owner">🟣 Django</div>
+      <ul class="tbl-cols">
+        <li class="pk">id BIGINT PK</li>
+        <li class="fk">company_id FK</li>
+        <li>provider_id</li>
+        <li>date TIMESTAMPTZ</li>
+        <li>amount, currency, exchange_rate</li>
+        <li>payment_method</li>
+        <li>created_at NOT NULL</li>
+        <li class="fk">sat_batchpaymentbank.batch_payment_id FK</li>
+      </ul>
+    </div>
+
+    <div class="tbl" id="db-payment">
+      <div class="tbl-name">sat_paymentcache</div>
+      <div class="tbl-owner">🟣 Django</div>
+      <ul class="tbl-cols">
+        <li class="pk">id BIGINT PK</li>
+        <li class="fk">company_id FK</li>
+        <li class="fk">invoice_id FK (nullable)</li>
+        <li class="fk">batch_payment_id FK (nullable)</li>
+        <li>provider_id</li>
+        <li>amount, currency</li>
+        <li>installment INT</li>
+        <li>created_at NOT NULL</li>
+      </ul>
+    </div>
+
+  </div>
+</div><!-- db-box -->
+
+<!-- ── FLOW SECTION ── -->
+<div class="lbl">Flujos de Procesamiento</div>
+<div class="flow-grid">
+
+  <div class="flow-card">
+    <div class="flow-title" style="color:#56d364">🧾 Ruta A — Facturas (invoice / finished)</div>
+    <div class="flow-step"><div class="snum">1</div><div class="stext">API externa dispara <code>extraction.created</code> o <code>extraction.updated</code></div></div>
+    <div class="flow-step"><div class="snum">2</div><div class="stext"><code>router.py</code> valida HMAC, guarda en <code>webhook_events</code>, encola tarea</div></div>
+    <div class="flow-step"><div class="snum">3</div><div class="stext">Worker lee evento · GET <code>/extractions/{id}</code> a API externa (estado real)</div></div>
+    <div class="flow-step"><div class="snum">4</div><div class="stext"><code>event_router.py</code> confirma <code>extractor=invoice</code>, <code>status=finished</code></div></div>
+    <div class="flow-step"><div class="snum">5</div><div class="stext">Busca <code>Company</code> por RFC en DB → si no existe: <code>FAILED</code></div></div>
+    <div class="flow-step"><div class="snum">6</div><div class="stext">POST <code>/sync/sync-started/</code> → Django: ExtractionSyncStatus = SYNCING</div></div>
+    <div class="flow-step"><div class="snum">7</div><div class="stext"><code>sync_all(company)</code>: ThreadPoolExecutor, facturas por año, conceptos y pagos</div></div>
+    <div class="flow-step"><div class="snum">8</div><div class="stext"><code>rebind_orphan_fks()</code> repara FKs nulas por orden no determinista del parallelismo</div></div>
+    <div class="flow-step"><div class="snum">9</div><div class="stext">POST <code>/sync/extraction-completed/</code> → Django actualiza status, envía email</div></div>
+    <div class="flow-step"><div class="snum">10</div><div class="stext">Evento marcado <code>PROCESSED</code> en DB</div></div>
+  </div>
+
+  <div class="flow-card">
+    <div class="flow-title" style="color:#ffa657">📄 Ruta B — Tax Docs (tax_status / tax_compliance)</div>
+    <div class="flow-step"><div class="snum o">1</div><div class="stext">Mismo flujo de recepción, validación y encolado</div></div>
+    <div class="flow-step"><div class="snum o">2</div><div class="stext"><code>event_router.py</code> detecta <code>extractor ∈ {tax_status, tax_compliance}</code></div></div>
+    <div class="flow-step"><div class="snum o">3</div><div class="stext">Solo actúa si <code>status ∈ {finished, error, stopped}</code>. Si no → SKIPPED</div></div>
+    <div class="flow-step"><div class="snum o">4</div><div class="stext">POST <code>/sync/extraction-status-update/</code> con <code>{extraction_id, extractor, status, rfc}</code></div></div>
+    <div class="flow-step"><div class="snum o">5</div><div class="stext">Django actualiza campo de status del contribuyente en su propia DB</div></div>
+    <div class="flow-step"><div class="snum o">6</div><div class="stext">Evento marcado <code>PROCESSED</code></div></div>
+    <div style="height:8px"></div>
+    <div class="flow-title" style="color:#f85149;margin-top:8px">⚠️ Casos de error</div>
+    <div class="flow-step"><div class="snum o">→</div><div class="stext">HMAC inválido: 401 inmediato, evento no se guarda</div></div>
+    <div class="flow-step"><div class="snum o">→</div><div class="stext">JSON inválido: 400 inmediato</div></div>
+    <div class="flow-step"><div class="snum o">→</div><div class="stext">ClientDisconnect: WARNING, responde 200, proveedor reenvía</div></div>
+    <div class="flow-step"><div class="snum o">→</div><div class="stext">Company RFC no existe: FAILED permanente</div></div>
+    <div class="flow-step"><div class="snum o">→</div><div class="stext">API externa 5xx / timeout: Celery reintenta ×3 (60s→240s)</div></div>
+  </div>
+
+  <div class="flow-card">
+    <div class="flow-title" style="color:#d2a8ff">🔁 Idempotencia (2 capas) + Reintentos</div>
+    <div class="flow-step"><div class="snum p">①</div><div class="stext"><strong>Capa 1 — Endpoint HTTP:</strong> <code>provider_event_id UNIQUE</code> — duplicados rechazados en INSERT, log + 200 OK</div></div>
+    <div class="flow-step"><div class="snum p">②</div><div class="stext"><strong>Capa 2 — Worker:</strong> query por <code>extraction_id</code> ya procesado → SKIPPED con <code>reason: extraction_already_processed</code></div></div>
+    <div style="height:10px"></div>
+    <div class="flow-title" style="color:#e3b341;margin-top:4px">🔄 Reintentos Celery</div>
+    <div class="flow-step"><div class="snum" style="background:#e3b341;color:#0d1117">↺</div><div class="stext"><code>max_retries=3</code> · backoff exponencial: 60s → 120s → 240s · tope 10min</div></div>
+    <div class="flow-step"><div class="snum" style="background:#e3b341;color:#0d1117">↺</div><div class="stext">Tenacity interno en clientes HTTP: 3 reintentos (2s→30s) — independientes de Celery</div></div>
+    <div class="flow-step"><div class="snum" style="background:#e3b341;color:#0d1117">↺</div><div class="stext">Si Celery agota reintentos → <code>MaxRetriesExceededError</code> → evento marcado <code>FAILED</code></div></div>
+    <div style="height:10px"></div>
+    <div class="flow-title" style="color:#56d364;margin-top:4px">🔗 Upsert Strategy</div>
+    <div class="flow-step"><div class="snum" style="background:#56d364;color:#0d1117">↑</div><div class="stext"><code>pg_insert().on_conflict_do_update(index_elements=['provider_id'])</code></div></div>
+    <div class="flow-step"><div class="snum" style="background:#56d364;color:#0d1117">↑</div><div class="stext"><code>created_at</code> excluido del UPDATE (Django <code>auto_now_add=True</code> — se setea solo en INSERT)</div></div>
+    <div class="flow-step"><div class="snum" style="background:#56d364;color:#0d1117">↑</div><div class="stext"><code>_trunc(val, max_len)</code> trunca strings a los VARCHAR limits de Django</div></div>
+  </div>
+
+</div><!-- flow-grid -->
+
+</div><!-- diagram-wrap -->
+
+<script>
+// ── Draw SVG arrows between key components ──
+(function() {
+  const wrap = document.getElementById('diagram-wrap');
+  const svg  = document.getElementById('arrows');
+
+  function rect(id) {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    const er = el.getBoundingClientRect();
+    const wr = wrap.getBoundingClientRect();
+    return {
+      top:    er.top    - wr.top,
+      bottom: er.bottom - wr.top,
+      left:   er.left   - wr.left,
+      right:  er.right  - wr.left,
+      cx:     er.left   - wr.left + er.width  / 2,
+      cy:     er.top    - wr.top  + er.height / 2,
+      w:      er.width,
+      h:      er.height,
+    };
+  }
+
+  function arrowDef(id, color) {
+    const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+    marker.setAttribute('id', id);
+    marker.setAttribute('markerWidth', '8');
+    marker.setAttribute('markerHeight', '8');
+    marker.setAttribute('refX', '6');
+    marker.setAttribute('refY', '3');
+    marker.setAttribute('orient', 'auto');
+    const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+    poly.setAttribute('points', '0 0, 8 3, 0 6');
+    poly.setAttribute('fill', color);
+    marker.appendChild(poly);
+    return marker;
+  }
+
+  function drawCurve(svg, x1, y1, x2, y2, color, markerId, dashed, label) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const cx1 = x1 + dx * 0.5;
+    const cy1 = y1;
+    const cx2 = x1 + dx * 0.5;
+    const cy2 = y2;
+
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', `M ${x1} ${y1} C ${cx1} ${cy1}, ${cx2} ${cy2}, ${x2} ${y2}`);
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', color);
+    path.setAttribute('stroke-width', '1.5');
+    if (dashed) path.setAttribute('stroke-dasharray', '5,3');
+    path.setAttribute('marker-end', `url(#${markerId})`);
+    svg.appendChild(path);
+
+    if (label) {
+      const tx = (x1 + x2) / 2;
+      const ty = (y1 + y2) / 2 - 6;
+      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      text.setAttribute('x', tx);
+      text.setAttribute('y', ty);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('font-size', '8');
+      text.setAttribute('fill', color);
+      text.setAttribute('font-family', 'Segoe UI, system-ui, sans-serif');
+      const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      const tw = label.length * 4.5 + 6;
+      bg.setAttribute('x', tx - tw/2);
+      bg.setAttribute('y', ty - 9);
+      bg.setAttribute('width', tw);
+      bg.setAttribute('height', 12);
+      bg.setAttribute('fill', '#0d1117');
+      bg.setAttribute('rx', '3');
+      svg.appendChild(bg);
+      text.textContent = label;
+      svg.appendChild(text);
+    }
+  }
+
+  window.addEventListener('load', () => {
+    svg.setAttribute('width',  wrap.offsetWidth);
+    svg.setAttribute('height', wrap.offsetHeight);
+
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    defs.appendChild(arrowDef('arr-blue',   '#388bfd'));
+    defs.appendChild(arrowDef('arr-orange', '#ffa657'));
+    defs.appendChild(arrowDef('arr-green',  '#56d364'));
+    defs.appendChild(arrowDef('arr-purple', '#d2a8ff'));
+    defs.appendChild(arrowDef('arr-red',    '#f85149'));
+    svg.appendChild(defs);
+
+    const proveedor = rect('ext-proveedor');
+    const redis     = rect('ext-redis');
+    const django    = rect('ext-django');
+    const router    = rect('mod-router');
+    const task      = rect('mod-task');
+    const sclient   = rect('mod-proveedor-client');
+    const dclient   = rect('mod-data-client');
+    const aclient   = rect('mod-aitax-client');
+    const synce     = rect('mod-sync');
+    const dbevents  = rect('db-events');
+    const dbinv     = rect('db-invoice');
+    const dbcon     = rect('db-concept');
+    const dbbatch   = rect('db-batch');
+    const dbpay     = rect('db-payment');
+    const dbcomp    = rect('db-company');
+
+    if (!proveedor || !router || !task) return;
+
+    // API externa → router (POST webhook, dashed blue)
+    drawCurve(svg,
+      proveedor.right, proveedor.cy,
+      router.left,     router.top + 30,
+      '#388bfd', 'arr-blue', true, 'POST webhook');
+
+    // router → redis (enqueue)
+    drawCurve(svg,
+      router.right, router.cy,
+      redis.left,   redis.cy,
+      '#ffa657', 'arr-orange', false, 'enqueue task');
+
+    // redis → task (dequeue)
+    drawCurve(svg,
+      redis.bottom, redis.cx,
+      task.left,    task.cy,
+      '#ffa657', 'arr-orange', true, 'dequeue');
+
+    // task → proveedor client (GET extraction)
+    drawCurve(svg,
+      task.right,   task.top + 40,
+      sclient.left, sclient.cy,
+      '#388bfd', 'arr-blue', false, 'GET extraction');
+
+    // proveedor client → API externa
+    drawCurve(svg,
+      sclient.cx,      sclient.top,
+      proveedor.cx,    proveedor.bottom,
+      '#388bfd', 'arr-blue', true, '');
+
+    // data client → API externa
+    drawCurve(svg,
+      dclient.cx,           dclient.top,
+      proveedor.right - 40, proveedor.bottom,
+      '#388bfd', 'arr-blue', true, 'paginate');
+
+    // task → aitax client (notify)
+    drawCurve(svg,
+      task.right,   task.top + 80,
+      aclient.left, aclient.cy,
+      '#56d364', 'arr-green', false, 'notify');
+
+    // aitax client → django
+    drawCurve(svg,
+      aclient.cx, aclient.top,
+      django.cx,  django.bottom,
+      '#56d364', 'arr-green', true, '');
+
+    // task → sync engine
+    drawCurve(svg,
+      task.right,  task.bottom - 20,
+      synce.left,  synce.cy,
+      '#56d364', 'arr-green', false, 'sync_all()');
+
+    // router → db events
+    drawCurve(svg,
+      router.bottom, router.cx,
+      dbevents.top,  dbevents.cx,
+      '#388bfd', 'arr-blue', false, 'save event');
+
+    // sync → db invoice
+    drawCurve(svg,
+      synce.bottom, synce.cx,
+      dbinv.top,    dbinv.cx,
+      '#56d364', 'arr-green', false, 'upsert');
+
+    // sync → db concept
+    drawCurve(svg,
+      synce.bottom, synce.cx + 10,
+      dbcon.top,    dbcon.cx,
+      '#56d364', 'arr-green', false, '');
+
+    // sync → db batch
+    drawCurve(svg,
+      synce.bottom, synce.cx + 20,
+      dbbatch.top,  dbbatch.cx,
+      '#56d364', 'arr-green', false, '');
+
+    // sync → db payment
+    drawCurve(svg,
+      synce.bottom, synce.cx + 30,
+      dbpay.top,    dbpay.cx,
+      '#56d364', 'arr-green', false, '');
+
+    // task reads Company from DB
+    drawCurve(svg,
+      dbcomp.top,  dbcomp.cx,
+      task.bottom, task.cx + 40,
+      '#d2a8ff', 'arr-purple', true, 'query RFC');
+  });
+})();
+</script>
+</body>
+</html>

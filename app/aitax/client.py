@@ -108,6 +108,31 @@ class AitaxClient:
             {"rfc": rfc, "extraction_id": extraction_id},
         )
 
+    def notify_sync_progress(
+        self,
+        rfc: str,
+        extraction_id: str,
+        invoices: int,
+        concepts: int,
+        payments: int,
+    ) -> dict:
+        """
+        POST /api/internal/sync/sync-progress/
+
+        Actualiza los contadores de progreso en tiempo real.
+        AITAX los expone al frontend cada 3s vía polling.
+        """
+        return self._post(
+            "/api/internal/sync/sync-progress/",
+            {
+                "rfc": rfc,
+                "extraction_id": extraction_id,
+                "invoices": invoices,
+                "concepts": concepts,
+                "payments": payments,
+            },
+        )
+
     def notify_extraction_status_update(
         self,
         extraction_id: str,

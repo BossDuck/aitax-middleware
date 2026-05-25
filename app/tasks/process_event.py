@@ -226,7 +226,62 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
                 "Iniciando sync_all para RFC=%s (company_id=%s, extraction_id=%s)",
                 rfc, company.id, extraction_id,
             )
-            aitax_result = sync_all(company)
+
+            total_invoices = 0
+            total_concepts = 0
+            total_payments = 0
+
+            def on_invoices_progress(count):
+                nonlocal total_invoices
+                total_invoices += count
+                try:
+                    with AitaxClient() as aitax:
+                        aitax.notify_sync_progress(
+                            rfc=rfc,
+                            extraction_id=str(extraction_id),
+                            invoices=total_invoices,
+                            concepts=total_concepts,
+                            payments=total_payments,
+                        )
+                except Exception as exc:
+                    logger.warning("sync_progress notify falló (invoices): %s", exc)
+
+            def on_concepts_progress(count):
+                nonlocal total_concepts
+                total_concepts += count
+                try:
+                    with AitaxClient() as aitax:
+                        aitax.notify_sync_progress(
+                            rfc=rfc,
+                            extraction_id=str(extraction_id),
+                            invoices=total_invoices,
+                            concepts=total_concepts,
+                            payments=total_payments,
+                        )
+                except Exception as exc:
+                    logger.warning("sync_progress notify falló (concepts): %s", exc)
+
+            def on_payments_progress(count):
+                nonlocal total_payments
+                total_payments += count
+                try:
+                    with AitaxClient() as aitax:
+                        aitax.notify_sync_progress(
+                            rfc=rfc,
+                            extraction_id=str(extraction_id),
+                            invoices=total_invoices,
+                            concepts=total_concepts,
+                            payments=total_payments,
+                        )
+                except Exception as exc:
+                    logger.warning("sync_progress notify falló (payments): %s", exc)
+
+            aitax_result = sync_all(
+                company,
+                invoices_callback=on_invoices_progress,
+                concepts_callback=on_concepts_progress,
+                payments_callback=on_payments_progress,
+            )
             logger.info("sync_all completado para RFC=%s: %s", rfc, aitax_result)
 
             # Notifica a Django para que actualice ExtractionSyncStatus y mande el email.
