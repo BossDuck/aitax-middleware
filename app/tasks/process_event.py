@@ -24,6 +24,8 @@ from app.syntage.event_router import (
     get_taxpayer_rfc,
 )
 
+from redis import Redis
+from redis.exceptions import LockNotOwnedError
 from sqlalchemy import select
 
 from app.aitax.client import (
@@ -32,10 +34,19 @@ from app.aitax.client import (
     AitaxRetryableError,
 )
 from app.aitax_models import Company
+from app.config import settings
 from app.sync.sync import sync_all
 
 
 logger = logging.getLogger(__name__)
+
+# Cliente Redis compartido por todos los tasks del worker.
+# Redis es thread-safe — no hace falta instanciar uno por task.
+_redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+
+# Tiempo máximo que puede durar un sync antes de que el lock expire automáticamente.
+# 8 horas — holgura suficiente para las empresas más grandes.
+_SYNC_LOCK_TIMEOUT = 28800
 
 
 # ─── Configuración de reintentos ──────────────────────────────────────
@@ -212,95 +223,131 @@ def process_webhook_event(self: Task, event_internal_id: str) -> dict:
                     "reason": f"company_not_found: {rfc}",
                 }
 
-            # Notifica a Django que el sync está por empezar → SYNCING
-            try:
-                with AitaxClient() as aitax:
-                    aitax.notify_sync_started(rfc=rfc, extraction_id=extraction_id)
-            except (AitaxDefinitiveError, AitaxRetryableError) as exc:
-                logger.warning(
-                    "No se pudo notificar sync-started a AITAX (RFC=%s): %s. Continuando sync.",
-                    rfc, exc,
-                )
-
-            logger.info(
-                "Iniciando sync_all para RFC=%s (company_id=%s, extraction_id=%s)",
-                rfc, company.id, extraction_id,
+            # ─── Lock por RFC ──────────────────────────────────────────────
+            # Evita que dos workers corran sync_all en paralelo para la misma
+            # empresa. Si el lock ya lo tiene otro worker, este evento se
+            # salta — el sync ya está en curso.
+            _lock = _redis.lock(
+                f"aitax:sync:{rfc}",
+                timeout=_SYNC_LOCK_TIMEOUT,
+                blocking_timeout=0,
             )
+            if not _lock.acquire(blocking=False):
+                logger.info(
+                    "Sync de RFC=%s ya en curso en otro worker. "
+                    "Marcando SKIPPED (event_id=%s).",
+                    rfc, event_uuid,
+                )
+                event.status = EventStatus.SKIPPED.value
+                event.last_error = f"Sync de RFC={rfc} ya en curso"
+                event.processed_at = datetime.now(timezone.utc)
+                db.commit()
+                return {
+                    "status": "skipped",
+                    "event_id": event_internal_id,
+                    "reason": "sync_already_running",
+                    "rfc": rfc,
+                }
 
-            total_invoices = 0
-            total_concepts = 0
-            total_payments = 0
-
-            def on_invoices_progress(count):
-                nonlocal total_invoices
-                total_invoices += count
-                try:
-                    with AitaxClient() as aitax:
-                        aitax.notify_sync_progress(
-                            rfc=rfc,
-                            extraction_id=str(extraction_id),
-                            invoices=total_invoices,
-                            concepts=total_concepts,
-                            payments=total_payments,
-                        )
-                except Exception as exc:
-                    logger.warning("sync_progress notify falló (invoices): %s", exc)
-
-            def on_concepts_progress(count):
-                nonlocal total_concepts
-                total_concepts += count
-                try:
-                    with AitaxClient() as aitax:
-                        aitax.notify_sync_progress(
-                            rfc=rfc,
-                            extraction_id=str(extraction_id),
-                            invoices=total_invoices,
-                            concepts=total_concepts,
-                            payments=total_payments,
-                        )
-                except Exception as exc:
-                    logger.warning("sync_progress notify falló (concepts): %s", exc)
-
-            def on_payments_progress(count):
-                nonlocal total_payments
-                total_payments += count
-                try:
-                    with AitaxClient() as aitax:
-                        aitax.notify_sync_progress(
-                            rfc=rfc,
-                            extraction_id=str(extraction_id),
-                            invoices=total_invoices,
-                            concepts=total_concepts,
-                            payments=total_payments,
-                        )
-                except Exception as exc:
-                    logger.warning("sync_progress notify falló (payments): %s", exc)
-
-            aitax_result = sync_all(
-                company,
-                invoices_callback=on_invoices_progress,
-                concepts_callback=on_concepts_progress,
-                payments_callback=on_payments_progress,
-            )
-            logger.info("sync_all completado para RFC=%s: %s", rfc, aitax_result)
-
-            # Notifica a Django para que actualice ExtractionSyncStatus y mande el email.
             try:
-                with AitaxClient() as aitax:
-                    aitax.notify_extraction_completed(rfc=rfc, extraction_id=extraction_id)
-                logger.info("AITAX notificado de sync completado para RFC=%s", rfc)
-            except AitaxDefinitiveError as exc:
-                logger.warning(
-                    "No se pudo notificar a AITAX tras sync (RFC=%s, status=%s): %s. "
-                    "El sync ya se hizo — se continúa como procesado.",
-                    rfc, exc.status_code, exc,
+                # Notifica a Django que el sync está por empezar → SYNCING
+                try:
+                    with AitaxClient() as aitax:
+                        aitax.notify_sync_started(rfc=rfc, extraction_id=extraction_id)
+                except (AitaxDefinitiveError, AitaxRetryableError) as exc:
+                    logger.warning(
+                        "No se pudo notificar sync-started a AITAX (RFC=%s): %s. Continuando sync.",
+                        rfc, exc,
+                    )
+
+                logger.info(
+                    "Iniciando sync_all para RFC=%s (company_id=%s, extraction_id=%s)",
+                    rfc, company.id, extraction_id,
                 )
-            except AitaxRetryableError as exc:
-                logger.warning(
-                    "Error transitorio al notificar a AITAX tras sync (RFC=%s): %s. "
-                    "El sync ya se hizo — se continúa como procesado.",
-                    rfc, exc,
+
+                total_invoices = 0
+                total_concepts = 0
+                total_payments = 0
+
+                def on_invoices_progress(count):
+                    nonlocal total_invoices
+                    total_invoices += count
+                    try:
+                        with AitaxClient() as aitax:
+                            aitax.notify_sync_progress(
+                                rfc=rfc,
+                                extraction_id=str(extraction_id),
+                                invoices=total_invoices,
+                                concepts=total_concepts,
+                                payments=total_payments,
+                            )
+                    except Exception as exc:
+                        logger.warning("sync_progress notify falló (invoices): %s", exc)
+
+                def on_concepts_progress(count):
+                    nonlocal total_concepts
+                    total_concepts += count
+                    try:
+                        with AitaxClient() as aitax:
+                            aitax.notify_sync_progress(
+                                rfc=rfc,
+                                extraction_id=str(extraction_id),
+                                invoices=total_invoices,
+                                concepts=total_concepts,
+                                payments=total_payments,
+                            )
+                    except Exception as exc:
+                        logger.warning("sync_progress notify falló (concepts): %s", exc)
+
+                def on_payments_progress(count):
+                    nonlocal total_payments
+                    total_payments += count
+                    try:
+                        with AitaxClient() as aitax:
+                            aitax.notify_sync_progress(
+                                rfc=rfc,
+                                extraction_id=str(extraction_id),
+                                invoices=total_invoices,
+                                concepts=total_concepts,
+                                payments=total_payments,
+                            )
+                    except Exception as exc:
+                        logger.warning("sync_progress notify falló (payments): %s", exc)
+
+                aitax_result = sync_all(
+                    company,
+                    invoices_callback=on_invoices_progress,
+                    concepts_callback=on_concepts_progress,
+                    payments_callback=on_payments_progress,
                 )
+                logger.info("sync_all completado para RFC=%s: %s", rfc, aitax_result)
+
+                # Notifica a Django para que actualice ExtractionSyncStatus y mande el email.
+                try:
+                    with AitaxClient() as aitax:
+                        aitax.notify_extraction_completed(rfc=rfc, extraction_id=extraction_id)
+                    logger.info("AITAX notificado de sync completado para RFC=%s", rfc)
+                except AitaxDefinitiveError as exc:
+                    logger.warning(
+                        "No se pudo notificar a AITAX tras sync (RFC=%s, status=%s): %s. "
+                        "El sync ya se hizo — se continúa como procesado.",
+                        rfc, exc.status_code, exc,
+                    )
+                except AitaxRetryableError as exc:
+                    logger.warning(
+                        "Error transitorio al notificar a AITAX tras sync (RFC=%s): %s. "
+                        "El sync ya se hizo — se continúa como procesado.",
+                        rfc, exc,
+                    )
+
+            finally:
+                try:
+                    _lock.release()
+                except LockNotOwnedError:
+                    # El lock expiró durante el sync (empresa que tardó más de 8h).
+                    logger.warning("Lock de sync para RFC=%s ya había expirado.", rfc)
+                except Exception as exc:
+                    logger.warning("Error liberando lock de sync para RFC=%s: %s", rfc, exc)
 
         elif result.action == ACTION_NOTIFY_STATUS_UPDATE:
             try:
